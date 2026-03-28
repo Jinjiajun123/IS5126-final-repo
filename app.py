@@ -7,6 +7,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from snownlp import SnowNLP
 from scipy import stats
+import re
+from collections import Counter
 
 # ─── Page Config ───
 st.set_page_config(
@@ -53,8 +55,6 @@ st.markdown("""
         border: 1px solid #ffcc80;
     }
     .pop-card h4 { margin: 0 0 0.3rem 0; color: #e65100; }
-    .ab-better { background: #e8f5e9; border: 2px solid #4caf50; }
-    .ab-worse { background: #ffebee; border: 2px solid #ef5350; }
     div[data-testid="stSidebar"] { background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%); }
     div[data-testid="stSidebar"] .stMarkdown { color: #e0e0e0; }
 </style>
@@ -94,6 +94,8 @@ category_mapping = artifacts['category_mapping']
 OPTIMAL_K = artifacts['OPTIMAL_K']
 pop_stats = artifacts.get('pop_stats', {})
 sent_cal = artifacts.get('sentiment_calibration', {})
+cluster_medians = artifacts.get('cluster_medians', {})
+cluster_weights = artifacts.get('cluster_weights', {})
 
 
 # ─── Helper Functions ───
@@ -146,7 +148,6 @@ def build_feature_vector(product_params, user_params, feat_cols, cat_map):
 
 
 def predict_proba_safe(mdl, feature_vec, feat_cols):
-    """Predict with proper feature names to avoid sklearn warnings."""
     X = pd.DataFrame([feature_vec], columns=feat_cols)
     return mdl.predict_proba(X)[0, 1]
 
@@ -172,11 +173,32 @@ def get_default_user_params():
     }
 
 
-# ─── Domain Knowledge Scoring ───
-# E-commerce best practices: title quality, content richness, pricing strategy
-# Each sub-score is 0-1, combined via weighted average.
+def get_cluster_user_params(cluster_id):
+    if cluster_id in cluster_medians:
+        return dict(cluster_medians[cluster_id])
+    return get_default_user_params()
 
-# Category keyword dictionaries for relevance scoring
+
+def predict_cluster_weighted(product_params, feat_cols, cat_map, coupon=0):
+    """Predict purchase probability using per-cluster user medians, weighted by cluster size."""
+    per_cluster = {}
+    weighted_sum = 0.0
+    for c_id in range(OPTIMAL_K):
+        user_params = get_cluster_user_params(c_id)
+        user_params['coupon_received'] = coupon
+        fv = build_feature_vector(product_params, user_params, feat_cols, cat_map)
+        prob = predict_proba_safe(model, fv, feat_cols)
+        w = cluster_weights.get(c_id, 1.0 / OPTIMAL_K)
+        weighted_sum += prob * w
+        per_cluster[c_id] = {
+            'prob': prob,
+            'weight': w,
+            'name': cluster_names.get(c_id, f'Cluster {c_id}'),
+        }
+    return weighted_sum, per_cluster
+
+
+# ─── Title Quality Scoring ───
 _CATEGORY_KEYWORDS = {
     '服饰鞋包': ['女装','男装','连衣裙','T恤','衬衫','外套','裤','裙','鞋','包','帽','袜',
                 '上衣','卫衣','毛衣','羽绒','大衣','风衣','夹克','西装','牛仔','短袖','长袖',
@@ -212,11 +234,7 @@ for _kws in _CATEGORY_KEYWORDS.values():
 
 
 def _score_title_quality(title_text, category):
-    """Evaluate title on 3 dimensions: character quality, category relevance, info density.
-    Returns (combined 0-1, breakdown dict with 3 sub-scores 0-100)."""
-    import re
-    from collections import Counter
-
+    """Evaluate title on 3 dimensions: character quality, category relevance, info density."""
     if not title_text or len(title_text.strip()) < 2:
         return 0.1, {'char_quality': 10, 'relevance': 0, 'info_density': 10}
 
@@ -225,7 +243,7 @@ def _score_title_quality(title_text, category):
     unique = len(set(chars))
     unique_ratio = unique / total
 
-    # --- Character Quality (anti-spam) ---
+    # Character Quality (anti-spam)
     max_consec = 1
     cur = 1
     for i in range(1, len(chars)):
@@ -253,7 +271,7 @@ def _score_title_quality(title_text, category):
     elif dominant_ratio > 0.35:
         char_q *= 0.5
 
-    # --- Category Relevance ---
+    # Category Relevance
     cat_kws = _CATEGORY_KEYWORDS.get(category, [])
     if cat_kws:
         cat_matched = sum(1 for kw in cat_kws if kw in title_text)
@@ -262,7 +280,7 @@ def _score_title_quality(title_text, category):
         general_matched = sum(1 for kw in _ALL_PRODUCT_KEYWORDS if kw in title_text)
         relevance = min(1.0, general_matched / 3)
 
-    # --- Information Density ---
+    # Information Density
     content = re.sub(r'[\s\W]', '', title_text)
     effective = []
     for i, c in enumerate(content):
@@ -280,10 +298,7 @@ def _score_title_quality(title_text, category):
 
 
 def _score_title_length(length, cat_bench_length):
-    """Optimal title: 15-35 chars. Too short hurts SEO, too long hurts readability."""
-    optimal = cat_bench_length
-    if optimal < 15:
-        optimal = 25
+    optimal = cat_bench_length if cat_bench_length >= 15 else 25
     diff = abs(length - optimal)
     if diff <= 5:
         return 1.0
@@ -298,22 +313,19 @@ def _score_title_length(length, cat_bench_length):
 
 
 def _score_sentiment(cal_emo):
-    """Higher positive sentiment is better for e-commerce titles."""
-    # Sigmoid-like: ramp from 0.3 to 0.8 maps to score 0.3 to 1.0
     if cal_emo >= 0.7:
         return 1.0
     elif cal_emo >= 0.6:
-        return 0.8 + (cal_emo - 0.6) * 2.0  # 0.8 -> 1.0
+        return 0.8 + (cal_emo - 0.6) * 2.0
     elif cal_emo >= 0.5:
-        return 0.6 + (cal_emo - 0.5) * 2.0  # 0.6 -> 0.8
+        return 0.6 + (cal_emo - 0.5) * 2.0
     elif cal_emo >= 0.4:
-        return 0.4 + (cal_emo - 0.4) * 2.0  # 0.4 -> 0.6
+        return 0.4 + (cal_emo - 0.4) * 2.0
     else:
         return max(0.1, cal_emo)
 
 
 def _score_images(img_count):
-    """3-6 images is optimal for most e-commerce platforms."""
     if 3 <= img_count <= 6:
         return 1.0
     elif img_count == 2 or img_count == 7:
@@ -327,12 +339,10 @@ def _score_images(img_count):
 
 
 def _score_video(has_video):
-    """Having a video boosts conversion significantly in e-commerce."""
     return 1.0 if has_video else 0.4
 
 
 def _score_price(price, cat_bench_price):
-    """Price at or below category benchmark is competitive."""
     if cat_bench_price <= 0:
         return 0.5
     ratio = price / cat_bench_price
@@ -349,7 +359,6 @@ def _score_price(price, cat_bench_price):
 
 
 def _score_discount(discount_rate):
-    """Moderate discount (5-20%) is optimal; no discount or extreme discount is suboptimal."""
     if 0.05 <= discount_rate <= 0.20:
         return 1.0
     elif 0.01 <= discount_rate < 0.05:
@@ -363,23 +372,14 @@ def _score_discount(discount_rate):
 
 
 def compute_domain_score(product_params, cat_bench, title_text=''):
-    """Compute domain knowledge score (0-100) based on e-commerce best practices.
-    Returns (total_score, breakdown_dict).
-    title_text: raw title string for quality/relevance analysis."""
+    """Compute domain knowledge score (0-100) based on e-commerce best practices."""
     category = product_params.get('category', '')
-
-    # Title quality: char quality + relevance + info density (replaces simple length + sentiment)
     tq_combined, tq_breakdown = _score_title_quality(title_text, category)
     tl_score = _score_title_length(product_params['title_length'], cat_bench.get('title_length', 27))
 
     weights = {
-        'title_quality': 0.25,
-        'title_length': 0.10,
-        'sentiment': 0.10,
-        'images': 0.15,
-        'video': 0.15,
-        'price': 0.15,
-        'discount': 0.10,
+        'title_quality': 0.25, 'title_length': 0.10, 'sentiment': 0.10,
+        'images': 0.15, 'video': 0.15, 'price': 0.15, 'discount': 0.10,
     }
     scores = {
         'title_quality': tq_combined,
@@ -392,139 +392,22 @@ def compute_domain_score(product_params, cat_bench, title_text=''):
     }
     total = sum(scores[k] * weights[k] for k in weights)
     breakdown = {k: scores[k] * 100 for k in scores}
-    # Attach title quality sub-breakdown for detailed display
     breakdown['_tq_detail'] = tq_breakdown
     return total * 100, breakdown
 
 
 def compute_hybrid_score(ml_prob, domain_score, ml_weight=0.5, domain_weight=0.5):
-    """Combine ML prediction and domain knowledge into a hybrid score (0-100).
-    ML prob is mapped to 0-100 scale relative to baseline purchase rate."""
-    # Normalize ML prob: dataset avg is ~45%, map to a 0-100 quality scale
-    # 0% prob -> 0, 45% -> 50, 90% -> 100
     baseline = df['label'].mean()
     ml_score = min(100, (ml_prob / baseline) * 50)
     hybrid = ml_weight * ml_score + domain_weight * domain_score
     return hybrid, ml_score
 
 
-def generate_recommendations_html(product_params, cat_bench, feature_vec, category):
-    """Generate recommendation cards as HTML."""
-    cards = []
-    title_length = product_params['title_length']
-    title_emo_score = product_params['title_emo_score']
-    img_count = product_params['img_count']
-    has_video = product_params['has_video']
-    price = product_params['price']
-    discount_rate = product_params['discount_rate']
-
-    # Title length
-    if title_length < cat_bench['title_length'] * 0.8:
-        _, _, delta = simulate_counterfactual(
-            model, pd.Series(feature_vec, index=feature_cols),
-            'title_length', cat_bench['title_length'], feature_cols
-        )
-        cards.append(f"""<div class="rec-card rec-card-positive">
-            <h4>Title: Increase Length</h4>
-            <p>Current: {title_length} chars | Benchmark: {cat_bench['title_length']:.0f} chars</p>
-            <p>Add more descriptive keywords to improve discoverability.</p>
-            <p><b>Expected lift: {delta*100:+.2f}%</b></p>
-        </div>""")
-    elif title_length > cat_bench['title_length'] * 1.5:
-        _, _, delta = simulate_counterfactual(
-            model, pd.Series(feature_vec, index=feature_cols),
-            'title_length', cat_bench['title_length'], feature_cols
-        )
-        cards.append(f"""<div class="rec-card rec-card-negative">
-            <h4>Title: Too Long</h4>
-            <p>Current: {title_length} chars | Benchmark: {cat_bench['title_length']:.0f} chars</p>
-            <p>Shorten for better readability. Focus on key selling points.</p>
-            <p><b>Expected lift: {delta*100:+.2f}%</b></p>
-        </div>""")
-
-    # Emotion score
-    if title_emo_score < cat_bench['title_emo_score'] * 0.7:
-        _, _, delta = simulate_counterfactual(
-            model, pd.Series(feature_vec, index=feature_cols),
-            'title_emo_score', cat_bench['title_emo_score'], feature_cols
-        )
-        cards.append(f"""<div class="rec-card rec-card-positive">
-            <h4>Title: Boost Emotion</h4>
-            <p>Current: {title_emo_score:.2f} | Benchmark: {cat_bench['title_emo_score']:.2f}</p>
-            <p>Use more engaging, emotional language in your title.</p>
-            <p><b>Expected lift: {delta*100:+.2f}%</b></p>
-        </div>""")
-
-    # Video
-    if has_video == 0:
-        _, _, delta = simulate_counterfactual(
-            model, pd.Series(feature_vec, index=feature_cols),
-            'has_video', 1, feature_cols
-        )
-        cards.append(f"""<div class="rec-card">
-            <h4>Content: Add Video</h4>
-            <p>Consider adding a product demonstration or unboxing video.</p>
-            <p><b>Expected lift: {delta*100:+.2f}%</b></p>
-        </div>""")
-
-    # Image count
-    if img_count < cat_bench['img_count'] * 0.7:
-        _, _, delta = simulate_counterfactual(
-            model, pd.Series(feature_vec, index=feature_cols),
-            'img_count', cat_bench['img_count'], feature_cols
-        )
-        cards.append(f"""<div class="rec-card rec-card-positive">
-            <h4>Content: More Images</h4>
-            <p>Current: {img_count} | Benchmark: {cat_bench['img_count']:.0f}</p>
-            <p>Add more high-quality product images from different angles.</p>
-            <p><b>Expected lift: {delta*100:+.2f}%</b></p>
-        </div>""")
-
-    # Price
-    if price > cat_bench['price'] * 1.3:
-        _, _, delta = simulate_counterfactual(
-            model, pd.Series(feature_vec, index=feature_cols),
-            'price', cat_bench['price'], feature_cols
-        )
-        cards.append(f"""<div class="rec-card rec-card-negative">
-            <h4>Price: Above Category Median</h4>
-            <p>Current: {price:.1f} | Category median: {cat_bench['price']:.1f}</p>
-            <p>Consider price reduction, bundle offers, or value-added services.</p>
-            <p><b>Expected lift: {delta*100:+.2f}%</b></p>
-        </div>""")
-
-    # Discount
-    if discount_rate < cat_bench['discount_rate'] * 0.5 and cat_bench['discount_rate'] > 0:
-        _, _, delta = simulate_counterfactual(
-            model, pd.Series(feature_vec, index=feature_cols),
-            'discount_rate', cat_bench['discount_rate'], feature_cols
-        )
-        cards.append(f"""<div class="rec-card rec-card-positive">
-            <h4>Discount: Consider Offering Discount</h4>
-            <p>Current: {discount_rate:.0%} | Category avg: {cat_bench['discount_rate']:.0%}</p>
-            <p>A moderate discount can significantly boost conversion.</p>
-            <p><b>Expected lift: {delta*100:+.2f}%</b></p>
-        </div>""")
-
-    # Target audience
-    if 'user_cluster' in df.columns:
-        cat_cluster_rates = df[df['category'] == category].groupby('user_cluster')['label'].mean()
-        best_cluster = cat_cluster_rates.idxmax()
-        best_rate = cat_cluster_rates.max()
-        cards.append(f"""<div class="rec-card">
-            <h4>Target Audience</h4>
-            <p>Best user segment: Cluster {best_cluster} ({cluster_names[best_cluster]})</p>
-            <p>Purchase rate for {category}: {best_rate:.1%}. Focus marketing on this segment.</p>
-        </div>""")
-
-    return cards
-
-
 # ─── Sidebar ───
 st.sidebar.markdown("## Navigation")
 page = st.sidebar.radio(
     "Select Page",
-    ["Dashboard", "Product Analyzer", "Title A/B Test", "User Clusters", "Category Insights"],
+    ["Product Analyzer", "User Clusters"],
     label_visibility="collapsed"
 )
 
@@ -533,158 +416,35 @@ st.sidebar.markdown(f"**Model**: {artifacts['model_name']}")
 st.sidebar.markdown(f"**AUC**: {comparison_df['auc'].max():.4f}")
 st.sidebar.markdown(f"**Samples**: {len(df):,}")
 st.sidebar.markdown(f"**Categories**: {len(category_mapping)}")
+st.sidebar.markdown(f"**Clusters**: {OPTIMAL_K}")
 st.sidebar.markdown("---")
-st.sidebar.markdown("**Sentiment**: SnowNLP")
-st.sidebar.markdown("**Calibration**: Beta QM")
-st.sidebar.caption("SnowNLP raw scores are calibrated via Beta quantile mapping to match the training data distribution")
+st.sidebar.markdown("**Sentiment**: SnowNLP + Beta QM")
+st.sidebar.caption("SnowNLP raw scores are calibrated via Beta quantile mapping to match training data distribution")
 
 
 # ═══════════════════════════════════════════════
-# PAGE 1: Dashboard
+# PAGE 1: Product Analyzer (Consolidated)
 # ═══════════════════════════════════════════════
-if page == "Dashboard":
-    st.markdown("# Seller Recommendation System")
-    st.markdown("Data-driven recommendations to improve product purchase rates")
-
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown(f"""<div class="metric-card">
-            <h3>Total Records</h3><h1>{len(df):,}</h1>
-        </div>""", unsafe_allow_html=True)
-    with col2:
-        st.markdown(f"""<div class="metric-card" style="background:linear-gradient(135deg,#f093fb 0%,#f5576c 100%)">
-            <h3>Purchase Rate</h3><h1>{df['label'].mean():.1%}</h1>
-        </div>""", unsafe_allow_html=True)
-    with col3:
-        st.markdown(f"""<div class="metric-card" style="background:linear-gradient(135deg,#4facfe 0%,#00f2fe 100%)">
-            <h3>Best AUC</h3><h1>{comparison_df['auc'].max():.4f}</h1>
-        </div>""", unsafe_allow_html=True)
-    with col4:
-        st.markdown(f"""<div class="metric-card" style="background:linear-gradient(135deg,#43e97b 0%,#38f9d7 100%)">
-            <h3>Categories</h3><h1>{len(category_mapping)}</h1>
-        </div>""", unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    st.markdown('<div class="section-header">Model Performance Comparison</div>', unsafe_allow_html=True)
-
-    col1, col2 = st.columns(2)
-    with col1:
-        fig = go.Figure()
-        metrics_list = ['accuracy', 'precision', 'recall', 'f1', 'auc']
-        colors_m = ['#667eea', '#f5576c', '#43e97b']
-        for i, (name, row) in enumerate(comparison_df.iterrows()):
-            fig.add_trace(go.Bar(
-                name=name, x=metrics_list, y=[row[m] for m in metrics_list],
-                marker_color=colors_m[i], opacity=0.9
-            ))
-        fig.update_layout(
-            title="Metrics Comparison", barmode='group',
-            yaxis_range=[0, 1], height=400,
-            plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-            font=dict(size=12)
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        fig = go.Figure()
-        fig.add_trace(go.Table(
-            header=dict(
-                values=['Model'] + [m.upper() for m in metrics_list],
-                fill_color='#667eea', font=dict(color='white', size=12),
-                align='center'
-            ),
-            cells=dict(
-                values=[
-                    comparison_df.index.tolist(),
-                    *[comparison_df[m].apply(lambda x: f'{x:.4f}').tolist() for m in metrics_list]
-                ],
-                fill_color=[['#f8f9fa', '#ffffff'] * 2],
-                align='center', font=dict(size=11)
-            )
-        ))
-        fig.update_layout(title="Detailed Metrics", height=400)
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown('<div class="section-header">Purchase Rate by Category</div>', unsafe_allow_html=True)
-    cat_stats = df.groupby('category').agg(
-        purchase_rate=('label', 'mean'),
-        count=('label', 'count'),
-        avg_price=('price', 'mean')
-    ).reset_index()
-
-    col1, col2 = st.columns(2)
-    with col1:
-        fig = px.bar(
-            cat_stats.sort_values('purchase_rate', ascending=False),
-            x='category', y='purchase_rate',
-            color='purchase_rate', color_continuous_scale='Viridis',
-            text=cat_stats.sort_values('purchase_rate', ascending=False)['purchase_rate'].apply(lambda x: f'{x:.1%}')
-        )
-        fig.update_layout(title="Purchase Rate", height=350, showlegend=False)
-        fig.update_traces(textposition='outside')
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        fig = px.bar(
-            cat_stats.sort_values('avg_price', ascending=False),
-            x='category', y='avg_price',
-            color='avg_price', color_continuous_scale='Magma',
-            text=cat_stats.sort_values('avg_price', ascending=False)['avg_price'].apply(lambda x: f'{x:.0f}')
-        )
-        fig.update_layout(title="Average Price", height=350, showlegend=False)
-        fig.update_traces(textposition='outside')
-        st.plotly_chart(fig, use_container_width=True)
-
-
-# ═══════════════════════════════════════════════
-# PAGE 2: Product Analyzer (Enhanced)
-# ═══════════════════════════════════════════════
-elif page == "Product Analyzer":
+if page == "Product Analyzer":
     st.markdown("# Product Analyzer")
-    st.markdown("Enter a product title and features to get purchase prediction, popularity estimate, user persona, and recommendations")
+    st.markdown("Input product features to get purchase prediction, quality analysis, user persona insights, and actionable seller recommendations")
 
     # ── Input Section ──
     st.markdown('<div class="section-header">Product Information</div>', unsafe_allow_html=True)
 
-    # Title input with auto sentiment
     product_title = st.text_input(
         "Product Title (Chinese)",
         value="",
         placeholder="e.g., 夏季新款时尚女装连衣裙 轻薄透气修身显瘦百搭"
     )
 
-    # Auto-compute title features
+    # Auto-compute title features (hidden from user)
     if product_title.strip():
         auto_title_length = len(product_title.strip())
         raw_emo, cal_emo = compute_sentiment(product_title.strip())
     else:
         auto_title_length = 25
         raw_emo, cal_emo = 0.5, 0.5
-
-    # Show auto-computed values
-    col_info1, col_info2, col_info3 = st.columns(3)
-    with col_info1:
-        st.markdown(f"""<div class="title-card">
-            <h4>Auto-detected Title Length</h4>
-            <span class="score">{auto_title_length}</span> characters
-        </div>""", unsafe_allow_html=True)
-    with col_info2:
-        raw_color = '#4caf50' if raw_emo > 0.6 else ('#ff9800' if raw_emo > 0.4 else '#f44336')
-        st.markdown(f"""<div class="title-card">
-            <h4>SnowNLP Raw Score</h4>
-            <span class="score" style="color:{raw_color}">{raw_emo:.3f}</span>
-            <span style="color:#999;font-size:0.8rem"> (original)</span>
-        </div>""", unsafe_allow_html=True)
-    with col_info3:
-        cal_color = '#4caf50' if cal_emo > 0.6 else ('#ff9800' if cal_emo > 0.4 else '#f44336')
-        st.markdown(f"""<div class="title-card">
-            <h4>Calibrated Score (used by model)</h4>
-            <span class="score" style="color:{cal_color}">{cal_emo:.3f}</span>
-            <span style="color:#999;font-size:0.8rem"> (Beta quantile mapped)</span>
-        </div>""", unsafe_allow_html=True)
-
-    st.markdown("---")
 
     # Product features
     col1, col2, col3 = st.columns(3)
@@ -712,24 +472,30 @@ elif page == "Product Analyzer":
             'discount_rate': discount_rate,
             'category': category,
         }
+        cat_bench = benchmarks[category]
+
+        # Cluster-weighted prediction
+        prob, per_cluster = predict_cluster_weighted(product_params, feature_cols, category_mapping, coupon)
+
+        # Build a feature vector for counterfactual analysis (using global median as base)
         user_params = get_default_user_params()
         user_params['coupon_received'] = coupon
         feature_vec = build_feature_vector(product_params, user_params, feature_cols, category_mapping)
 
-        # ── Row 1: ML Prediction + Hybrid Score + Popularity ──
-        col_pred, col_domain, col_pop = st.columns(3)
+        # ════════════════════════════════════════════
+        # Section 1: Prediction Results
+        # ════════════════════════════════════════════
+        st.markdown('<div class="section-header">Prediction Results</div>', unsafe_allow_html=True)
 
-        cat_bench = benchmarks[category]
+        col_pred, col_hybrid = st.columns(2)
 
         with col_pred:
-            st.markdown('<div class="section-header">ML Model Prediction</div>', unsafe_allow_html=True)
-            prob = predict_proba_safe(model, feature_vec, feature_cols)
-
+            # Gauge: cluster-weighted purchase probability
             fig = go.Figure(go.Indicator(
                 mode="gauge+number",
                 value=prob * 100,
-                number={'suffix': '%', 'font': {'size': 30}},
-                title={'text': "Purchase Probability"},
+                number={'suffix': '%', 'font': {'size': 28}},
+                title={'text': "Cluster-Weighted Purchase Probability"},
                 gauge={
                     'axis': {'range': [0, 100]},
                     'bar': {'color': '#667eea'},
@@ -744,20 +510,18 @@ elif page == "Product Analyzer":
                     }
                 }
             ))
-            fig.update_layout(height=260, margin=dict(t=50, b=10))
+            fig.update_layout(height=250, margin=dict(t=50, b=10))
             st.plotly_chart(fig, use_container_width=True)
 
-        with col_domain:
-            st.markdown('<div class="section-header">Hybrid Score</div>', unsafe_allow_html=True)
-
+        with col_hybrid:
             domain_total, domain_breakdown = compute_domain_score(product_params, cat_bench, product_title)
             hybrid, ml_score = compute_hybrid_score(prob, domain_total)
 
             fig = go.Figure(go.Indicator(
                 mode="gauge+number",
                 value=hybrid,
-                number={'suffix': '', 'font': {'size': 30}},
-                title={'text': "ML + Domain Knowledge"},
+                number={'font': {'size': 28}},
+                title={'text': "Hybrid Score (ML + Domain Knowledge)"},
                 gauge={
                     'axis': {'range': [0, 100]},
                     'bar': {'color': '#ff9800'},
@@ -768,24 +532,60 @@ elif page == "Product Analyzer":
                     ],
                 }
             ))
-            fig.update_layout(height=260, margin=dict(t=50, b=10))
+            fig.update_layout(height=250, margin=dict(t=50, b=10))
             st.plotly_chart(fig, use_container_width=True)
 
-            # Domain breakdown
-            # Main dimensions (exclude _tq_detail)
+        # Per-cluster prediction breakdown
+        st.markdown("**Per-Cluster Purchase Probability:**")
+        c_labels = [f"C{c}: {per_cluster[c]['name']}" for c in per_cluster]
+        c_probs = [per_cluster[c]['prob'] * 100 for c in per_cluster]
+        c_weights_pct = [per_cluster[c]['weight'] * 100 for c in per_cluster]
+        c_colors = ['#667eea', '#f5576c', '#43e97b', '#f39c12']
+
+        fig_cl = go.Figure()
+        fig_cl.add_trace(go.Bar(
+            x=[f"C{c}" for c in per_cluster], y=c_probs,
+            marker_color=c_colors[:len(c_probs)],
+            text=[f'{p:.1f}%' for p in c_probs],
+            textposition='outside',
+            name='Purchase Prob'
+        ))
+        fig_cl.update_layout(
+            yaxis_title="Purchase Probability (%)",
+            height=220, margin=dict(t=10, b=10, l=40, r=10),
+            plot_bgcolor='rgba(0,0,0,0)'
+        )
+        st.plotly_chart(fig_cl, use_container_width=True)
+
+        # Cluster legend
+        cluster_info_cols = st.columns(OPTIMAL_K)
+        for i, ci_col in enumerate(cluster_info_cols):
+            with ci_col:
+                st.caption(f"C{i}: {cluster_names[i]} ({cluster_weights.get(i, 0)*100:.1f}% of users)")
+
+        # ════════════════════════════════════════════
+        # Section 2: Domain Score Breakdown + Title Quality
+        # ════════════════════════════════════════════
+        st.markdown("---")
+        st.markdown('<div class="section-header">Domain Score Breakdown</div>', unsafe_allow_html=True)
+
+        col_domain, col_tq = st.columns(2)
+
+        with col_domain:
             main_keys = [k for k in domain_breakdown if not k.startswith('_')]
             bd_label_map = {
-                'title_quality': 'Title Quality',
-                'title_length': 'Title Length',
-                'sentiment': 'Sentiment',
-                'images': 'Images',
-                'video': 'Video',
-                'price': 'Price',
-                'discount': 'Discount',
+                'title_quality': 'Title Quality (25%)',
+                'title_length': 'Title Length (10%)',
+                'sentiment': 'Sentiment (10%)',
+                'images': 'Images (15%)',
+                'video': 'Video (15%)',
+                'price': 'Price (15%)',
+                'discount': 'Discount (10%)',
             }
             bd_display = [bd_label_map.get(k, k) for k in main_keys]
             bd_vals = [domain_breakdown[k] for k in main_keys]
             bd_colors = ['#4caf50' if v >= 70 else ('#ff9800' if v >= 40 else '#f44336') for v in bd_vals]
+
             fig2 = go.Figure(go.Bar(
                 x=bd_vals, y=bd_display, orientation='h',
                 marker_color=bd_colors,
@@ -793,20 +593,21 @@ elif page == "Product Analyzer":
                 textposition='outside'
             ))
             fig2.update_layout(
-                title="Domain Score Breakdown",
-                xaxis_range=[0, 115], height=250,
-                margin=dict(l=100, t=30, b=10, r=10),
+                title=f"Domain Score: {domain_total:.0f}/100",
+                xaxis_range=[0, 115], height=300,
+                margin=dict(l=140, t=35, b=10, r=10),
                 plot_bgcolor='rgba(0,0,0,0)'
             )
             st.plotly_chart(fig2, use_container_width=True)
 
-            # Title quality sub-breakdown
+        with col_tq:
             tq_detail = domain_breakdown.get('_tq_detail', {})
             if tq_detail:
-                tq_labels = ['Char Quality', 'Category Relevance', 'Info Density']
+                tq_labels = ['Char Quality (anti-spam)', 'Category Relevance', 'Info Density']
                 tq_keys = ['char_quality', 'relevance', 'info_density']
                 tq_vals = [tq_detail.get(k, 0) for k in tq_keys]
                 tq_colors = ['#4caf50' if v >= 70 else ('#ff9800' if v >= 40 else '#f44336') for v in tq_vals]
+
                 fig3 = go.Figure(go.Bar(
                     x=tq_vals, y=tq_labels, orientation='h',
                     marker_color=tq_colors,
@@ -815,69 +616,32 @@ elif page == "Product Analyzer":
                 ))
                 fig3.update_layout(
                     title="Title Quality Detail",
-                    xaxis_range=[0, 115], height=170,
-                    margin=dict(l=120, t=30, b=10, r=10),
+                    xaxis_range=[0, 115], height=200,
+                    margin=dict(l=170, t=35, b=10, r=10),
                     plot_bgcolor='rgba(0,0,0,0)'
                 )
                 st.plotly_chart(fig3, use_container_width=True)
 
-        with col_pop:
-            st.markdown('<div class="section-header">Estimated Popularity</div>', unsafe_allow_html=True)
-
+            # Popularity estimate
             if category in pop_stats:
                 ps = pop_stats[category]
-                # Estimate relative position based on product features vs category stats
-                cat_data_raw = df_raw[df_raw['category'] == category]
-
-                # Simple heuristic: products with higher predicted purchase prob tend to be more popular
-                like_est = ps['like_num_median']
-                collect_est = ps['collect_num_median']
-
-                # Adjust by purchase probability relative to category average
                 cat_avg_rate = df[df['category'] == category]['label'].mean()
                 ratio = prob / cat_avg_rate if cat_avg_rate > 0 else 1.0
-
-                like_est_adj = like_est * ratio
-                collect_est_adj = collect_est * ratio
-
-                # Show as percentile within category
-                like_pct = (cat_data_raw['like_num'] <= like_est_adj).mean() * 100
-                collect_pct = (cat_data_raw['collect_num'] <= collect_est_adj).mean() * 100
+                like_est = ps['like_num_median'] * ratio
+                collect_est = ps['collect_num_median'] * ratio
 
                 st.markdown(f"""<div class="pop-card">
-                    <h4>Estimated Engagement (vs {category})</h4>
-                    <p>Estimated likes: <b>~{like_est_adj:.0f}</b> (top {100-like_pct:.0f}% in category)</p>
-                    <p>Estimated collections: <b>~{collect_est_adj:.0f}</b> (top {100-collect_pct:.0f}% in category)</p>
-                    <p>Category median likes: {ps['like_num_median']:.0f} | collections: {ps['collect_num_median']:.0f}</p>
+                    <h4>Estimated Engagement ({category})</h4>
+                    <p>Estimated likes: <b>~{like_est:.0f}</b> | collections: <b>~{collect_est:.0f}</b></p>
+                    <p>Category median: likes {ps['like_num_median']:.0f} / collections {ps['collect_num_median']:.0f}</p>
                 </div>""", unsafe_allow_html=True)
 
-                # Mini bar chart
-                fig = go.Figure()
-                fig.add_trace(go.Bar(
-                    x=['Likes', 'Collections', 'Comments', 'Shares'],
-                    y=[ps['like_num_median'], ps['collect_num_median'],
-                       ps['comment_num_median'], ps['share_num_median']],
-                    name='Category Median',
-                    marker_color='#bdbdbd'
-                ))
-                fig.add_trace(go.Bar(
-                    x=['Likes', 'Collections', 'Comments', 'Shares'],
-                    y=[like_est_adj, collect_est_adj,
-                       ps['comment_num_median'] * ratio,
-                       ps['share_num_median'] * ratio],
-                    name='Your Estimate',
-                    marker_color='#ff9800'
-                ))
-                fig.update_layout(
-                    barmode='group', height=200,
-                    margin=dict(t=10, b=30),
-                    legend=dict(orientation='h', y=1.15),
-                    plot_bgcolor='rgba(0,0,0,0)'
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-        # ── Row 2: Counterfactual Analysis ──
+        # ════════════════════════════════════════════
+        # Section 3: Counterfactual Analysis
+        # ════════════════════════════════════════════
+        st.markdown("---")
         st.markdown('<div class="section-header">Counterfactual Analysis</div>', unsafe_allow_html=True)
+        st.caption("Shows expected purchase rate change if each feature is changed to category benchmark value")
 
         cf_results = []
         for feat in SELLER_CONTROLLABLE:
@@ -905,260 +669,198 @@ elif page == "Product Analyzer":
             textposition='outside'
         ))
         fig.update_layout(
-            title="Expected Purchase Rate Change (if feature changed to category benchmark)",
+            title="Expected Purchase Rate Change (current -> category benchmark)",
             xaxis_title="Probability Change (%)",
-            height=280, margin=dict(l=130, t=40),
+            height=250, margin=dict(l=130, t=40),
             plot_bgcolor='rgba(0,0,0,0)'
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        # ── Row 3: User Persona + Recommendations ──
+        # ════════════════════════════════════════════
+        # Section 4: Target User Persona + Recommendations
+        # ════════════════════════════════════════════
+        st.markdown("---")
+        st.markdown('<div class="section-header">Target User Persona & Seller Recommendations</div>', unsafe_allow_html=True)
+
         col_persona, col_recs = st.columns([1, 1.5])
 
         with col_persona:
-            st.markdown('<div class="section-header">Target User Persona</div>', unsafe_allow_html=True)
-
             if 'user_cluster' in df.columns:
                 cat_cluster_rates = df[df['category'] == category].groupby('user_cluster')['label'].mean()
-                best_cluster = cat_cluster_rates.idxmax()
-                best_rate = cat_cluster_rates.max()
-                bp = cluster_profiles.loc[best_cluster]
+                if len(cat_cluster_rates) > 0:
+                    best_cluster = cat_cluster_rates.idxmax()
+                    best_rate = cat_cluster_rates.max()
+                    bp = cluster_profiles.loc[best_cluster]
 
-                st.markdown(f"""<div class="metric-card" style="background:linear-gradient(135deg,#ff6f00 0%,#ff8f00 100%);text-align:left;padding:1.2rem">
-                    <h3>Best Segment: Cluster {best_cluster}</h3>
-                    <h1 style="font-size:1.3rem">{cluster_names[best_cluster]}</h1>
-                    <p style="margin-top:0.8rem;font-size:0.85rem;opacity:0.95">
-                    Purchase rate: <b>{best_rate:.1%}</b><br>
-                    Avg age: <b>{bp['age']:.0f}</b> |
-                    Gender: <b>{'Male' if bp['gender'] > 0.5 else 'Female'}</b><br>
-                    Avg spend: <b>{bp['total_spend']:,.0f}</b> |
-                    User level: <b>{bp['user_level']:.1f}</b><br>
-                    Freq: <b>{bp['purchase_freq']:.0f}</b> purchases |
-                    <b>{int(bp['count']):,}</b> users
-                    </p>
-                </div>""", unsafe_allow_html=True)
+                    st.markdown(f"""<div class="metric-card" style="background:linear-gradient(135deg,#ff6f00 0%,#ff8f00 100%);text-align:left;padding:1.2rem">
+                        <h3>Best Segment for {category}</h3>
+                        <h1 style="font-size:1.2rem">{cluster_names[best_cluster]}</h1>
+                        <p style="margin-top:0.8rem;font-size:0.85rem;opacity:0.95">
+                        Purchase rate: <b>{best_rate:.1%}</b><br>
+                        Avg age: <b>{bp['age']:.0f}</b> |
+                        Gender: <b>{'Male' if bp['gender'] > 0.5 else 'Female'}</b><br>
+                        Avg spend: <b>{bp['total_spend']:,.0f}</b> |
+                        Level: <b>{bp['user_level']:.1f}</b><br>
+                        Freq: <b>{bp['purchase_freq']:.0f}</b> |
+                        <b>{int(bp['count']):,}</b> users
+                        </p>
+                    </div>""", unsafe_allow_html=True)
 
-                # Show all clusters comparison for this category
-                fig = go.Figure()
-                colors_cl = ['#667eea', '#f5576c', '#43e97b', '#f39c12']
-                for ci in range(OPTIMAL_K):
-                    rate = cat_cluster_rates.get(ci, 0)
-                    fig.add_trace(go.Bar(
-                        x=[f'C{ci}'], y=[rate * 100],
-                        name=f'C{ci}: {cluster_names[ci]}',
-                        marker_color=colors_cl[ci],
-                        text=[f'{rate*100:.1f}%'],
-                        textposition='outside'
-                    ))
-                fig.update_layout(
-                    title=f"Purchase Rate by Cluster ({category})",
-                    yaxis_title="Purchase Rate (%)",
-                    height=250, margin=dict(t=40, b=20),
-                    showlegend=False,
-                    plot_bgcolor='rgba(0,0,0,0)'
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                    # Category purchase rate by cluster bar chart
+                    fig_cp = go.Figure()
+                    colors_cl = ['#667eea', '#f5576c', '#43e97b', '#f39c12']
+                    for ci in range(OPTIMAL_K):
+                        rate = cat_cluster_rates.get(ci, 0)
+                        fig_cp.add_trace(go.Bar(
+                            x=[f'C{ci}'], y=[rate * 100],
+                            name=f'C{ci}',
+                            marker_color=colors_cl[ci],
+                            text=[f'{rate*100:.1f}%'],
+                            textposition='outside'
+                        ))
+                    fig_cp.update_layout(
+                        title=f"Purchase Rate by Cluster ({category})",
+                        yaxis_title="Purchase Rate (%)",
+                        height=250, margin=dict(t=40, b=20),
+                        showlegend=False,
+                        plot_bgcolor='rgba(0,0,0,0)'
+                    )
+                    st.plotly_chart(fig_cp, use_container_width=True)
 
         with col_recs:
-            st.markdown('<div class="section-header">Actionable Recommendations</div>', unsafe_allow_html=True)
+            st.markdown("**Actionable Recommendations:**")
 
-            rec_cards = generate_recommendations_html(product_params, cat_bench, feature_vec, category)
-            if rec_cards:
-                for card in rec_cards:
+            cards = []
+            title_length = product_params['title_length']
+            title_emo_score = product_params['title_emo_score']
+
+            # Title quality recommendation
+            tq_score = domain_breakdown.get('title_quality', 0)
+            if tq_score < 60:
+                cards.append(f"""<div class="rec-card rec-card-negative">
+                    <h4>Title Quality: Needs Improvement</h4>
+                    <p>Title quality score: {tq_score:.0f}/100. Consider using more relevant keywords, avoiding repetitive characters, and increasing information density.</p>
+                </div>""")
+
+            # Title length
+            if title_length < cat_bench['title_length'] * 0.8:
+                _, _, delta = simulate_counterfactual(
+                    model, pd.Series(feature_vec, index=feature_cols),
+                    'title_length', cat_bench['title_length'], feature_cols
+                )
+                cards.append(f"""<div class="rec-card rec-card-positive">
+                    <h4>Title: Increase Length</h4>
+                    <p>Current: {title_length} chars | Benchmark: {cat_bench['title_length']:.0f} chars</p>
+                    <p>Add more descriptive keywords for better discoverability. <b>Expected lift: {delta*100:+.2f}%</b></p>
+                </div>""")
+            elif title_length > cat_bench['title_length'] * 1.5:
+                _, _, delta = simulate_counterfactual(
+                    model, pd.Series(feature_vec, index=feature_cols),
+                    'title_length', cat_bench['title_length'], feature_cols
+                )
+                cards.append(f"""<div class="rec-card rec-card-negative">
+                    <h4>Title: Too Long</h4>
+                    <p>Current: {title_length} chars | Benchmark: {cat_bench['title_length']:.0f} chars</p>
+                    <p>Shorten for readability. Focus on key selling points. <b>Expected lift: {delta*100:+.2f}%</b></p>
+                </div>""")
+
+            # Sentiment
+            if title_emo_score < cat_bench['title_emo_score'] * 0.7:
+                _, _, delta = simulate_counterfactual(
+                    model, pd.Series(feature_vec, index=feature_cols),
+                    'title_emo_score', cat_bench['title_emo_score'], feature_cols
+                )
+                cards.append(f"""<div class="rec-card rec-card-positive">
+                    <h4>Title: Boost Emotional Appeal</h4>
+                    <p>Current: {title_emo_score:.2f} | Benchmark: {cat_bench['title_emo_score']:.2f}</p>
+                    <p>Use more engaging, positive language. <b>Expected lift: {delta*100:+.2f}%</b></p>
+                </div>""")
+
+            # Video
+            if has_video == 0:
+                _, _, delta = simulate_counterfactual(
+                    model, pd.Series(feature_vec, index=feature_cols),
+                    'has_video', 1, feature_cols
+                )
+                cards.append(f"""<div class="rec-card">
+                    <h4>Content: Add Product Video</h4>
+                    <p>Video content significantly boosts conversion. Consider demo or unboxing. <b>Expected lift: {delta*100:+.2f}%</b></p>
+                </div>""")
+
+            # Images
+            if img_count < cat_bench['img_count'] * 0.7:
+                _, _, delta = simulate_counterfactual(
+                    model, pd.Series(feature_vec, index=feature_cols),
+                    'img_count', cat_bench['img_count'], feature_cols
+                )
+                cards.append(f"""<div class="rec-card rec-card-positive">
+                    <h4>Content: More Images</h4>
+                    <p>Current: {img_count} | Benchmark: {cat_bench['img_count']:.0f}. Add multi-angle product shots. <b>Expected lift: {delta*100:+.2f}%</b></p>
+                </div>""")
+
+            # Price
+            if price > cat_bench['price'] * 1.3:
+                _, _, delta = simulate_counterfactual(
+                    model, pd.Series(feature_vec, index=feature_cols),
+                    'price', cat_bench['price'], feature_cols
+                )
+                cards.append(f"""<div class="rec-card rec-card-negative">
+                    <h4>Price: Above Category Median</h4>
+                    <p>Current: {price:.1f} | Category median: {cat_bench['price']:.1f}</p>
+                    <p>Consider price reduction or bundle offers. <b>Expected lift: {delta*100:+.2f}%</b></p>
+                </div>""")
+
+            # Discount
+            if discount_rate < cat_bench['discount_rate'] * 0.5 and cat_bench['discount_rate'] > 0:
+                _, _, delta = simulate_counterfactual(
+                    model, pd.Series(feature_vec, index=feature_cols),
+                    'discount_rate', cat_bench['discount_rate'], feature_cols
+                )
+                cards.append(f"""<div class="rec-card rec-card-positive">
+                    <h4>Discount: Consider Offering Discount</h4>
+                    <p>Current: {discount_rate:.0%} | Category avg: {cat_bench['discount_rate']:.0%}</p>
+                    <p>A moderate 5-20% discount can boost conversion. <b>Expected lift: {delta*100:+.2f}%</b></p>
+                </div>""")
+
+            # Target audience
+            if 'user_cluster' in df.columns and len(cat_cluster_rates) > 0:
+                cards.append(f"""<div class="rec-card">
+                    <h4>Target Audience</h4>
+                    <p>Focus marketing on <b>{cluster_names[best_cluster]}</b> segment ({best_rate:.1%} purchase rate for {category}).</p>
+                    <p>This segment has {int(cluster_profiles.loc[best_cluster, 'count']):,} users.</p>
+                </div>""")
+
+            if cards:
+                for card in cards:
                     st.markdown(card, unsafe_allow_html=True)
             else:
-                st.success("Your product features are well-aligned with category benchmarks. No major improvements needed.")
+                st.success("Product features are well-aligned with category benchmarks. No major improvements needed.")
+
+        # ════════════════════════════════════════════
+        # Section 5: Category Benchmarks Reference
+        # ════════════════════════════════════════════
+        st.markdown("---")
+        st.markdown('<div class="section-header">Category Benchmark Reference</div>', unsafe_allow_html=True)
+
+        bench_data = {
+            'Feature': SELLER_CONTROLLABLE,
+            'Your Value': [product_params[f] for f in SELLER_CONTROLLABLE],
+            'Category Benchmark': [cat_bench[f] for f in SELLER_CONTROLLABLE],
+        }
+        bench_df = pd.DataFrame(bench_data)
+        bench_df['Status'] = bench_df.apply(
+            lambda r: 'Above' if r['Your Value'] > r['Category Benchmark'] * 1.1
+            else ('Below' if r['Your Value'] < r['Category Benchmark'] * 0.9 else 'On target'),
+            axis=1
+        )
+        st.dataframe(bench_df, use_container_width=True, hide_index=True)
 
     else:
         st.info("Enter a product title and configure features above, then click **Analyze Product** to get comprehensive analysis.")
 
 
 # ═══════════════════════════════════════════════
-# PAGE 3: Title A/B Test
-# ═══════════════════════════════════════════════
-elif page == "Title A/B Test":
-    st.markdown("# Title A/B Test")
-    st.markdown("Compare two product titles side-by-side to see which performs better")
-
-    category_ab = st.selectbox("Product Category", list(category_mapping.keys()), key="ab_cat")
-
-    col_shared, _ = st.columns([1, 1])
-    with col_shared:
-        st.markdown("**Shared Product Features**")
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            ab_price = st.number_input("Price", 1.0, 1000.0, 80.0, step=5.0, key="ab_price")
-        with c2:
-            ab_discount = st.slider("Discount", 0.0, 0.5, 0.1, step=0.01, key="ab_disc")
-        with c3:
-            ab_img = st.slider("Images", 0, 10, 3, key="ab_img")
-        with c4:
-            ab_video = st.selectbox("Video?", [0, 1], format_func=lambda x: "Yes" if x else "No", key="ab_vid")
-
-    st.markdown("---")
-
-    col_a, col_b = st.columns(2)
-
-    with col_a:
-        st.markdown("### Title A")
-        title_a = st.text_area("Enter Title A", value="", height=80, key="title_a",
-                               placeholder="e.g., 新款春装女连衣裙")
-
-    with col_b:
-        st.markdown("### Title B")
-        title_b = st.text_area("Enter Title B", value="", height=80, key="title_b",
-                               placeholder="e.g., 2024春季新款时尚女装连衣裙 修身显瘦百搭气质")
-
-    compare_btn = st.button("Compare Titles", type="primary", use_container_width=True)
-
-    if compare_btn and title_a.strip() and title_b.strip():
-        user_params = get_default_user_params()
-        cat_bench_ab = benchmarks[category_ab]
-
-        results_ab = []
-        for label, title in [("A", title_a.strip()), ("B", title_b.strip())]:
-            tl = len(title)
-            raw_s, cal_s = compute_sentiment(title)
-            pp = {
-                'title_length': tl,
-                'title_emo_score': cal_s,
-                'img_count': ab_img,
-                'has_video': ab_video,
-                'price': ab_price,
-                'discount_rate': ab_discount,
-                'category': category_ab,
-            }
-            fv = build_feature_vector(pp, user_params, feature_cols, category_mapping)
-            prob = predict_proba_safe(model, fv, feature_cols)
-            d_total, d_bd = compute_domain_score(pp, cat_bench_ab, title)
-            h_score, ml_s = compute_hybrid_score(prob, d_total)
-            results_ab.append({
-                'label': label,
-                'title': title,
-                'length': tl,
-                'raw_sentiment': raw_s,
-                'sentiment': cal_s,
-                'purchase_prob': prob,
-                'domain_score': d_total,
-                'hybrid_score': h_score,
-                'domain_breakdown': d_bd,
-            })
-
-        ra, rb = results_ab[0], results_ab[1]
-        winner = "A" if ra['hybrid_score'] > rb['hybrid_score'] else "B"
-        diff_hybrid = abs(ra['hybrid_score'] - rb['hybrid_score'])
-
-        st.markdown("---")
-
-        # Results comparison
-        col_ra, col_mid, col_rb = st.columns([2, 1, 2])
-
-        with col_ra:
-            css = "ab-better" if winner == "A" else "ab-worse"
-            st.markdown(f"""<div class="title-card {css}" style="min-height:280px">
-                <h4>Title A {"(Winner)" if winner == "A" else ""}</h4>
-                <p style="font-size:0.9rem;color:#333;margin:0.5rem 0">"{ra['title']}"</p>
-                <p>Length: <b>{ra['length']}</b> chars | Sentiment: <b>{ra['sentiment']:.3f}</b></p>
-                <p>ML Prob: <b>{ra['purchase_prob']:.1%}</b> | Domain: <b>{ra['domain_score']:.0f}</b></p>
-                <p style="font-size:1.4rem;margin-top:0.5rem;color:#1a237e">Hybrid Score: <b>{ra['hybrid_score']:.1f}</b></p>
-            </div>""", unsafe_allow_html=True)
-
-        with col_mid:
-            st.markdown(f"""<div style="text-align:center;padding-top:60px">
-                <p style="font-size:2rem;font-weight:bold;color:#667eea">VS</p>
-                <p style="font-size:0.9rem;color:#666">Hybrid diff: {diff_hybrid:.1f}</p>
-            </div>""", unsafe_allow_html=True)
-
-        with col_rb:
-            css = "ab-better" if winner == "B" else "ab-worse"
-            st.markdown(f"""<div class="title-card {css}" style="min-height:280px">
-                <h4>Title B {"(Winner)" if winner == "B" else ""}</h4>
-                <p style="font-size:0.9rem;color:#333;margin:0.5rem 0">"{rb['title']}"</p>
-                <p>Length: <b>{rb['length']}</b> chars | Sentiment: <b>{rb['sentiment']:.3f}</b></p>
-                <p>ML Prob: <b>{rb['purchase_prob']:.1%}</b> | Domain: <b>{rb['domain_score']:.0f}</b></p>
-                <p style="font-size:1.4rem;margin-top:0.5rem;color:#1a237e">Hybrid Score: <b>{rb['hybrid_score']:.1f}</b></p>
-            </div>""", unsafe_allow_html=True)
-
-        # Detail comparison chart
-        fig = make_subplots(rows=1, cols=4, subplot_titles=["Title Length", "Calibrated Sentiment", "Domain Score", "Hybrid Score"])
-
-        for i, (metric, vals) in enumerate([
-            ("Length", [ra['length'], rb['length']]),
-            ("Sentiment", [ra['sentiment'], rb['sentiment']]),
-            ("Domain", [ra['domain_score'], rb['domain_score']]),
-            ("Hybrid", [ra['hybrid_score'], rb['hybrid_score']])
-        ]):
-            fig.add_trace(go.Bar(
-                x=['A', 'B'], y=vals,
-                marker_color=['#667eea', '#f5576c'],
-                text=[f'{v:.1f}' for v in vals],
-                textposition='outside',
-                showlegend=False
-            ), row=1, col=i+1)
-
-        fig.update_layout(height=280, margin=dict(t=40, b=20))
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Domain breakdown comparison
-        st.markdown('<div class="section-header">Domain Score Breakdown Comparison</div>', unsafe_allow_html=True)
-        bd_keys = [k for k in ra['domain_breakdown'] if not k.startswith('_')]
-        bd_label_map = {
-            'title_quality': 'Title Quality', 'title_length': 'Title Length',
-            'sentiment': 'Sentiment', 'images': 'Images', 'video': 'Video',
-            'price': 'Price', 'discount': 'Discount',
-        }
-        bd_labels = [bd_label_map.get(k, k) for k in bd_keys]
-        fig_bd = go.Figure()
-        fig_bd.add_trace(go.Bar(
-            name='Title A', y=bd_labels, x=[ra['domain_breakdown'][k] for k in bd_keys],
-            orientation='h', marker_color='#667eea',
-            text=[f"{ra['domain_breakdown'][k]:.0f}" for k in bd_keys], textposition='outside'
-        ))
-        fig_bd.add_trace(go.Bar(
-            name='Title B', y=bd_labels, x=[rb['domain_breakdown'][k] for k in bd_keys],
-            orientation='h', marker_color='#f5576c',
-            text=[f"{rb['domain_breakdown'][k]:.0f}" for k in bd_keys], textposition='outside'
-        ))
-        fig_bd.update_layout(
-            barmode='group', height=300, xaxis_range=[0, 115],
-            margin=dict(l=110, t=10, b=20),
-            legend=dict(orientation='h', y=1.15),
-            plot_bgcolor='rgba(0,0,0,0)'
-        )
-        st.plotly_chart(fig_bd, use_container_width=True)
-
-        # Title quality sub-detail comparison
-        tq_a = ra['domain_breakdown'].get('_tq_detail', {})
-        tq_b = rb['domain_breakdown'].get('_tq_detail', {})
-        if tq_a and tq_b:
-            st.markdown('<div class="section-header">Title Quality Detail</div>', unsafe_allow_html=True)
-            tq_keys = ['char_quality', 'relevance', 'info_density']
-            tq_labels = ['Char Quality', 'Category Relevance', 'Info Density']
-            fig_tq = go.Figure()
-            fig_tq.add_trace(go.Bar(
-                name='Title A', y=tq_labels, x=[tq_a.get(k, 0) for k in tq_keys],
-                orientation='h', marker_color='#667eea',
-                text=[f"{tq_a.get(k, 0):.0f}" for k in tq_keys], textposition='outside'
-            ))
-            fig_tq.add_trace(go.Bar(
-                name='Title B', y=tq_labels, x=[tq_b.get(k, 0) for k in tq_keys],
-                orientation='h', marker_color='#f5576c',
-                text=[f"{tq_b.get(k, 0):.0f}" for k in tq_keys], textposition='outside'
-            ))
-            fig_tq.update_layout(
-                barmode='group', height=220, xaxis_range=[0, 115],
-                margin=dict(l=130, t=10, b=20),
-                legend=dict(orientation='h', y=1.15),
-                plot_bgcolor='rgba(0,0,0,0)'
-            )
-            st.plotly_chart(fig_tq, use_container_width=True)
-
-    elif compare_btn:
-        st.warning("Please enter both Title A and Title B.")
-
-
-# ═══════════════════════════════════════════════
-# PAGE 4: User Clusters
+# PAGE 2: User Clusters
 # ═══════════════════════════════════════════════
 elif page == "User Clusters":
     st.markdown("# User Cluster Analysis")
@@ -1168,16 +870,18 @@ elif page == "User Clusters":
         st.warning("Run the notebook first to generate cluster assignments.")
         st.stop()
 
+    # ── Cluster Overview Cards ──
     cols = st.columns(OPTIMAL_K)
     colors_cluster = ['#667eea', '#f5576c', '#43e97b', '#f39c12']
     for i, col in enumerate(cols):
         with col:
             pr = cluster_profiles.loc[i, 'purchase_rate']
             cnt = int(cluster_profiles.loc[i, 'count'])
+            pct = cnt / len(df) * 100
             st.markdown(f"""<div class="metric-card" style="background:linear-gradient(135deg,{colors_cluster[i]} 0%,{colors_cluster[i]}88 100%)">
                 <h3>Cluster {i}</h3>
                 <h1>{pr:.1%}</h1>
-                <p style="margin:0;font-size:0.75rem;opacity:0.8">{cluster_names[i]}<br>{cnt:,} users</p>
+                <p style="margin:0;font-size:0.75rem;opacity:0.8">{cluster_names[i]}<br>{cnt:,} users ({pct:.1f}%)</p>
             </div>""", unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1186,15 +890,17 @@ elif page == "User Clusters":
 
     with col1:
         st.markdown('<div class="section-header">Cluster Feature Profiles</div>', unsafe_allow_html=True)
-        radar_features = ['age', 'user_level', 'purchase_freq', 'total_spend', 'register_days']
-        cluster_means = df.groupby('user_cluster')[radar_features].mean()
-        cluster_means_norm = (cluster_means - cluster_means.min()) / (cluster_means.max() - cluster_means.min())
+
+        radar_features = ['age', 'user_level', 'purchase_freq', 'total_spend', 'purchase_intent', 'add2cart']
+        available_radar = [f for f in radar_features if f in df.columns]
+        cluster_means = df.groupby('user_cluster')[available_radar].mean()
+        cluster_means_norm = (cluster_means - cluster_means.min()) / (cluster_means.max() - cluster_means.min() + 1e-9)
 
         fig = go.Figure()
         for i in range(OPTIMAL_K):
             vals = cluster_means_norm.loc[i].tolist()
             vals.append(vals[0])
-            cats = radar_features + [radar_features[0]]
+            cats = available_radar + [available_radar[0]]
             fig.add_trace(go.Scatterpolar(
                 r=vals, theta=cats,
                 fill='toself', name=f'C{i}: {cluster_names[i]}',
@@ -1217,8 +923,8 @@ elif page == "User Clusters":
 
             pr_coupon = df[c_mask & coupon_mask]['label'].mean() if (c_mask & coupon_mask).sum() > 0 else 0
             pr_no_coupon = df[c_mask & no_coupon_mask]['label'].mean() if (c_mask & no_coupon_mask).sum() > 0 else 0
-            pr_video = df[c_mask & (df['has_video'] == 1)]['label'].mean()
-            pr_no_video = df[c_mask & (df['has_video'] == 0)]['label'].mean()
+            pr_video = df[c_mask & (df['has_video'] == 1)]['label'].mean() if (c_mask & (df['has_video'] == 1)).sum() > 0 else 0
+            pr_no_video = df[c_mask & (df['has_video'] == 0)]['label'].mean() if (c_mask & (df['has_video'] == 0)).sum() > 0 else 0
 
             marketing_data.append({
                 'Cluster': f'C{c}',
@@ -1250,88 +956,38 @@ elif page == "User Clusters":
         )
         st.plotly_chart(fig, use_container_width=True)
 
+    # ── Detailed Profiles Table ──
     st.markdown('<div class="section-header">Detailed Cluster Profiles</div>', unsafe_allow_html=True)
-    display_cols = ['age', 'gender', 'user_level', 'purchase_freq', 'total_spend', 'register_days', 'purchase_rate', 'count']
+
+    display_cols = [c for c in ['age', 'gender', 'user_level', 'purchase_freq', 'total_spend',
+                                'purchase_intent', 'add2cart', 'purchase_rate', 'count']
+                    if c in cluster_profiles.columns]
     display_df = cluster_profiles[display_cols].copy()
-    display_df.index = [f'Cluster {i} ({cluster_names[i]})' for i in display_df.index]
-    display_df['purchase_rate'] = display_df['purchase_rate'].apply(lambda x: f'{x:.1%}')
-    display_df['count'] = display_df['count'].apply(lambda x: f'{x:,.0f}')
-    display_df['total_spend'] = display_df['total_spend'].apply(lambda x: f'{x:,.0f}')
+    display_df.index = [f'C{i}: {cluster_names[i]}' for i in display_df.index]
+    if 'purchase_rate' in display_df.columns:
+        display_df['purchase_rate'] = display_df['purchase_rate'].apply(lambda x: f'{x:.1%}')
+    if 'count' in display_df.columns:
+        display_df['count'] = display_df['count'].apply(lambda x: f'{x:,.0f}')
+    if 'total_spend' in display_df.columns:
+        display_df['total_spend'] = display_df['total_spend'].apply(lambda x: f'{x:,.0f}')
     st.dataframe(display_df, use_container_width=True)
 
+    # ── Purchase Rate by Category x Cluster ──
+    st.markdown('<div class="section-header">Purchase Rate by Category x Cluster</div>', unsafe_allow_html=True)
 
-# ═══════════════════════════════════════════════
-# PAGE 5: Category Insights
-# ═══════════════════════════════════════════════
-elif page == "Category Insights":
-    st.markdown("# Category Insights")
-    st.markdown("Benchmark analysis by product category")
+    cat_cluster = df.groupby(['category', 'user_cluster'])['label'].mean().reset_index()
+    cat_cluster.columns = ['category', 'cluster', 'purchase_rate']
+    cat_cluster['cluster_name'] = cat_cluster['cluster'].map(lambda x: f'C{x}: {cluster_names.get(x, "")}')
 
-    selected_cat = st.selectbox("Select Category", list(benchmarks.keys()))
-
-    cat_data = df[df['category'] == selected_cat]
-    cat_purchased = cat_data[cat_data['label'] == 1]
-    cat_not_purchased = cat_data[cat_data['label'] == 0]
-    cat_bench = benchmarks[selected_cat]
-
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Records", f"{len(cat_data):,}")
-    with col2:
-        st.metric("Purchase Rate", f"{cat_data['label'].mean():.1%}")
-    with col3:
-        st.metric("Avg Price", f"{cat_data['price'].mean():.1f}")
-    with col4:
-        st.metric("Video Rate", f"{cat_data['has_video'].mean():.1%}")
-
-    st.markdown("---")
-
-    st.markdown('<div class="section-header">Category Benchmarks (from purchased items)</div>', unsafe_allow_html=True)
-
-    bench_display = pd.DataFrame({
-        'Feature': SELLER_CONTROLLABLE,
-        'Category Median (All)': [cat_data[f].median() for f in SELLER_CONTROLLABLE],
-        'Benchmark (Purchased)': [cat_bench[f] for f in SELLER_CONTROLLABLE],
-        'Category Mean (All)': [cat_data[f].mean() for f in SELLER_CONTROLLABLE],
-    })
-    st.dataframe(bench_display, use_container_width=True, hide_index=True)
-
-    st.markdown('<div class="section-header">Feature Distributions: Purchased vs Not Purchased</div>', unsafe_allow_html=True)
-
-    col1, col2 = st.columns(2)
-
-    continuous_feats = ['title_length', 'title_emo_score', 'img_count', 'price', 'discount_rate']
-    for i, feat in enumerate(continuous_feats):
-        with (col1 if i % 2 == 0 else col2):
-            fig = go.Figure()
-            fig.add_trace(go.Histogram(
-                x=cat_not_purchased[feat], name='Not Purchased',
-                marker_color='#ff5252', opacity=0.6, histnorm='probability density'
-            ))
-            fig.add_trace(go.Histogram(
-                x=cat_purchased[feat], name='Purchased',
-                marker_color='#00c853', opacity=0.6, histnorm='probability density'
-            ))
-            fig.update_layout(
-                title=f'{feat} Distribution',
-                barmode='overlay', height=300,
-                plot_bgcolor='rgba(0,0,0,0)'
-            )
-            fig.add_vline(x=cat_bench[feat], line_dash="dash", line_color="blue",
-                          annotation_text=f"Benchmark: {cat_bench[feat]:.1f}")
-            st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown('<div class="section-header">Video Impact</div>', unsafe_allow_html=True)
-    video_rates = cat_data.groupby('has_video')['label'].mean()
-    fig = go.Figure(go.Bar(
-        x=['No Video', 'Has Video'],
-        y=video_rates.values * 100,
-        marker_color=['#ff5252', '#00c853'],
-        text=[f'{v*100:.1f}%' for v in video_rates.values],
-        textposition='outside'
-    ))
-    fig.update_layout(
-        title=f"Purchase Rate: Video vs No Video ({selected_cat})",
-        yaxis_title="Purchase Rate (%)", height=350
+    fig = px.bar(
+        cat_cluster, x='category', y='purchase_rate', color='cluster_name',
+        barmode='group', color_discrete_sequence=colors_cluster,
+        text=cat_cluster['purchase_rate'].apply(lambda x: f'{x:.1%}')
     )
+    fig.update_layout(
+        title="Purchase Rate by Category and Cluster",
+        yaxis_title="Purchase Rate",
+        height=400, legend_title="Cluster"
+    )
+    fig.update_traces(textposition='outside')
     st.plotly_chart(fig, use_container_width=True)
