@@ -1,0 +1,180 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
+
+/* Premium Taobao E-Commerce Design System */
+:root {
+  /* Color Palette */
+  --bg-color: #F8F9FA; /* Extremely clean, soft background */
+  --surface-color: #FFFFFF; /* Pure white for contrast */
+  
+  /* Text */
+  --text-primary: #1C1C1E;
+  --text-secondary: #6B7280;
+  --text-muted: #9CA3AF;
+  
+  --border-color: #F3F4F6;
+  --border-focus: #FF5000;
+
+  /* Accents - Taobao Signature Orange/Red */
+  --accent-color: #FF5000; 
+  --accent-hover: #E64800;
+  --accent-gradient: linear-gradient(135deg, #FF5000 0%, #FF8C00 100%);
+  --accent-soft: rgba(255, 80, 0, 0.08);
+  
+  /* Semantic */
+  --success: #10B981;
+  --warning: #F59E0B;
+  --danger: #EF4444;
+
+  /* Elevated, clean, professional shadows */
+  --shadow-sm: 0 2px 8px rgba(255, 80, 0, 0.05);
+  --shadow-md: 0 10px 20px -5px rgba(255, 80, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.03);
+  --shadow-lg: 0 20px 30px -10px rgba(255, 80, 0, 0.15), 0 10px 15px -3px rgba(0, 0, 0, 0.04);
+
+  /* Radius */
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 28px;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  /* Premium SaaS Dotted Background */
+  background-color: #FAFAFA;
+  background-image: radial-gradient(rgba(255, 80, 0, 0.1) 1px, transparent 1px);
+  background-size: 24px 24px;
+  background-attachment: fixed;
+  color: var(--text-primary);
+  font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  line-height: 1.6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Typography Scale */
+h1, h2, h3, h4, h5 {
+  margin: 0;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+h1 { 
+  font-size: 2.8rem; 
+  line-height: 1.1; 
+  font-weight: 800; 
+  letter-spacing: -0.03em; 
+  /* Elegant gradient text */
+  background: linear-gradient(135deg, #1C1C1E 0%, #4B5563 100%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  display: inline-block;
+}
+
+h3 { font-size: 1.35rem; font-weight: 700; margin-bottom: 1rem; color: #1C1C1E; }
+h4 { font-size: 1.1rem; font-weight: 600; color: #1C1C1E; margin-bottom: 0.5rem;}
+p { margin: 0; color: var(--text-secondary); font-weight: 400;}
+
+/* Layout & Cards */
+.container {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 3rem;
+}
+
+.card {
+  background: var(--surface-color);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.03), 0 2px 4px -1px rgba(0, 0, 0, 0.02);
+  padding: 2.5rem;
+  border: 1px solid var(--border-color);
+  transition: all 0.3s ease;
+}
+
+.card:hover {
+  box-shadow: var(--shadow-lg);
+  transform: translateY(-2px);
+  border-color: rgba(255, 80, 0, 0.1);
+}
+
+/* Forms & Inputs */
+input, select, textarea, button {
+  font-family: inherit;
+  outline: none;
+}
+
+.input-field {
+  width: 100%;
+  padding: 1rem 1.25rem;
+  border: 1.5px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-color);
+  color: var(--text-primary);
+  font-size: 1rem;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.input-field:focus {
+  border-color: var(--accent-color);
+  background: #FFFFFF;
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+/* Buttons */
+.btn-primary {
+  background: var(--accent-gradient);
+  color: white;
+  border: none;
+  padding: 1rem 2rem;
+  border-radius: var(--radius-lg);
+  font-size: 1.05rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 8px 16px -4px rgba(255, 80, 0, 0.3);
+}
+
+.btn-primary:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 20px -4px rgba(255, 80, 0, 0.4);
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn-primary:disabled {
+  background: var(--text-muted);
+  box-shadow: none;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* Functional Layout */
+.flex { display: flex; }
+.flex-col { display: flex; flex-direction: column; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+.justify-center { justify-content: center; }
+.gap-2 { gap: 0.5rem; }
+.gap-4 { gap: 1rem; }
+.gap-6 { gap: 1.5rem; }
+.gap-8 { gap: 2rem; }
+.grid { display: grid; }
+.grid-cols-2 { grid-template-columns: repeat(2, 1fr); }
+
+/* Spinners */
+.spinner { width: 1.4rem; height: 1.4rem; animation: rotate 1.5s linear infinite; }
+.path { stroke: white; stroke-linecap: round; animation: dash 1.5s ease-in-out infinite; }
+@keyframes rotate { 100% { transform: rotate(360deg); } }
+@keyframes dash { 
+  0% { stroke-dasharray: 1, 150; stroke-dashoffset: 0; } 
+  50% { stroke-dasharray: 90, 150; stroke-dashoffset: -35; } 
+  100% { stroke-dasharray: 90, 150; stroke-dashoffset: -124; } 
+}
