@@ -3,15 +3,6 @@ __pycache__/
 *.pyc
 .DS_Store
 
-# Data files
-*.csv
-*.pkl
-*.db
-*.parquet
-
-# Model artifacts
-model_artifacts.pkl
-
 # Node modules
 node_modules/
 
