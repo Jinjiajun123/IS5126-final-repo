@@ -1,845 +1,673 @@
-# Social E-commerce Purchase Prediction & Seller Recommendation System
+# 社交电商购买预测与卖家优化系统技术报告
 
-## Technical Report
+## 1. 项目概述
+
+### 1.1 项目背景
+
+在社交电商场景中，卖家最关心的问题并不是“用户最终买没买”，而是：
+
+- 商品刚上架时，这个 listing 是否具备较高转化潜力？
+- 当用户已经进入商品浏览会话后，当前这次会话是否大概率会转化？
+- 卖家可以优先优化哪些可控因素，例如标题、图片数、价格、折扣、视频等？
+
+因此，本项目不再把“购买预测”看作单一任务，而是将其拆分为两个具有不同业务时点的预测任务，并配套聚类分层与可解释建议模块。
+
+### 1.2 项目目标
+
+本项目的目标包括：
+
+1. 构建两类购买预测模型：
+   - `listing_time`：商品上架时预测
+   - `session_time`：会话过程中预测
+2. 明确区分真实可部署特征、会话行为特征和禁止使用的泄漏特征。
+3. 使用统一的训练管线保证训练、评估和推理一致性。
+4. 通过用户聚类构建商家可理解的人群画像与运营策略建议。
+5. 为前端诊断页面提供可落地的概率输出、混合评分和优化建议。
+
+### 1.3 方法总览
+
+当前系统由以下几个部分组成：
+
+- 双任务监督学习：
+  - `listing_time`
+  - `session_time`
+- 特征分层与 leakage 控制
+- `Pipeline + ColumnTransformer` 统一预处理
+- 三种评估切分：
+  - 分层随机切分
+  - 时间代理切分
+  - 用户分组切分
+- 概率校准
+- 阈值调优
+- 用户聚类对比实验：
+  - `KMeans`
+  - `HDBSCAN`
+- 规则评分与混合评分：
+  - `domain score`
+  - `hybrid score`
 
 ---
 
-## Table of Contents
+## 2. 数据集说明
 
-1. [Project Overview](#1-project-overview)
-2. [Dataset Description](#2-dataset-description)
-3. [Data Preprocessing & Feature Engineering](#3-data-preprocessing--feature-engineering)
-4. [Model Construction & Comparison](#4-model-construction--comparison)
-5. [Model Selection & Training Details](#5-model-selection--training-details)
-6. [Model Interpretability](#6-model-interpretability)
-7. [Sentiment Analysis Pipeline](#7-sentiment-analysis-pipeline)
-8. [User Clustering](#8-user-clustering)
-9. [Recommendation Engine](#9-recommendation-engine)
-10. [System Architecture & Pipeline](#10-system-architecture--pipeline)
-11. [Dashboard & Result Presentation](#11-dashboard--result-presentation)
-12. [Limitations & Future Work](#12-limitations--future-work)
+### 2.1 数据概况
 
----
+原始数据文件为 [social_ecommerce_data.csv](/Users/macbookpro/Desktop/5126final/IS5126-final-repo/social_ecommerce_data.csv)。
 
-## 1. Project Overview
+数据概况如下：
 
-### 1.1 Problem Statement
-
-In social e-commerce platforms, sellers face the challenge of optimizing product listings to maximize purchase conversion rates. The key question is: **given a product's attributes (title, images, price, discount, video, etc.), what actionable changes can a seller make to improve the purchase probability?**
-
-### 1.2 Objectives
-
-1. Build a purchase prediction model that accurately classifies whether a user-product interaction leads to a purchase.
-2. Identify the most impactful seller-controllable features through interpretability analysis.
-3. Segment users into meaningful clusters for targeted marketing.
-4. Provide actionable, data-driven recommendations for sellers through an interactive dashboard.
-
-### 1.3 Approach
-
-The project adopts a full-stack data science pipeline:
-
-- **Data Preprocessing**: Data leakage identification, feature engineering, and stratified train-test split.
-- **Multi-Model Comparison**: Logistic Regression, Random Forest, and XGBoost trained and evaluated on the same split.
-- **Model Interpretability**: SHAP values, Partial Dependence Plots (PDP), and Counterfactual Analysis.
-- **Sentiment Analysis**: SnowNLP-based Chinese text sentiment scoring with Beta quantile calibration.
-- **User Clustering**: K-Means segmentation for user persona analysis.
-- **Hybrid Scoring**: Combining ML prediction with domain knowledge rules.
-- **Interactive Dashboard**: Streamlit-based product analyzer with seller recommendations.
-
----
-
-## 2. Dataset Description
-
-### 2.1 Overview
-
-| Attribute | Value |
+| 指标 | 数值 |
 |---|---|
-| Source | Social e-commerce platform interaction logs |
-| Total Records | 100,000 |
-| Total Features | 32 (raw) |
-| Target Variable | `label` (1 = purchased, 0 = not purchased) |
-| Purchase Rate | 44.98% (44,983 positive / 55,017 negative) |
-| Categories | 6 (服饰鞋包, 数码家电, 食品生鲜, 美妆个护, 家居日用, 其他) |
+| 样本量 | 100,000 |
+| 原始特征数 | 32 |
+| 目标变量 | `label` |
+| 正类含义 | `1 = 购买` |
+| 购买率 | 44.98% |
 
-### 2.2 Feature Dictionary
+### 2.2 特征分组
 
-The 32 raw features are organized into the following groups:
+为了适配双任务建模，本项目将特征分为四类：
 
-**ID Features (2)** - Dropped before modeling:
-| Feature | Type | Description |
-|---|---|---|
-| `user_id` | string | User identifier |
-| `item_id` | string | Product identifier |
+#### 2.2.1 卖家可控特征
 
-**User Demographics (8)**:
-| Feature | Type | Description |
-|---|---|---|
-| `age` | int | User age |
-| `gender` | binary | 0 = Female, 1 = Male |
-| `user_level` | int | Platform user level (1-5) |
-| `purchase_freq` | int | Historical purchase frequency |
-| `total_spend` | float | Cumulative spending amount |
-| `register_days` | int | Days since registration |
-| `follow_num` | int | Number of users followed |
-| `fans_num` | int | Number of followers |
+- `title_length`
+- `title_emo_score`
+- `img_count`
+- `has_video`
+- `price`
+- `discount_rate`
 
-**Seller-Controllable Product Features (6)**:
-| Feature | Type | Description |
-|---|---|---|
-| `title_length` | int | Product title character count |
-| `title_emo_score` | float | Title sentiment score (0-1) |
-| `img_count` | int | Number of product images |
-| `has_video` | binary | Whether listing includes video |
-| `price` | float | Product price |
-| `discount_rate` | float | Discount percentage (0-1) |
+这些特征可直接被卖家优化，是 `listing_time` 模型的核心。
 
-**Engagement Metrics (6)** - Identified as data leakage, dropped:
-| Feature | Type | Description |
-|---|---|---|
-| `like_num` | int | Number of likes |
-| `comment_num` | int | Number of comments |
-| `share_num` | int | Number of shares |
-| `collect_num` | int | Number of collections |
-| `interaction_rate` | float | Composite interaction rate |
-| `social_influence` | float | Social influence score |
+#### 2.2.2 静态用户上下文特征
 
-**Behavioral Features (7)**:
-| Feature | Type | Description |
-|---|---|---|
-| `is_follow_author` | binary | Whether user follows the seller |
-| `add2cart` | binary | Whether product was added to cart |
-| `coupon_received` | binary | Whether user received a coupon |
-| `coupon_used` | binary | Whether coupon was used |
-| `pv_count` | int | Page view count |
-| `last_click_gap` | float | Days since last click |
-| `purchase_intent` | float | Computed purchase intent score |
-| `freshness_score` | float | Product listing freshness |
+- `age`
+- `gender`
+- `user_level`
+- `purchase_freq`
+- `total_spend`
+- `register_days`
+- `follow_num`
+- `fans_num`
 
-**Other**:
-| Feature | Type | Description |
-|---|---|---|
-| `category` | string | Product category |
-| `label` | binary | Target: 1 = purchased, 0 = not purchased |
+这些特征相对稳定，适合作为用户画像背景信息。
+
+#### 2.2.3 会话行为特征
+
+- `is_follow_author`
+- `add2cart`
+- `coupon_received`
+- `coupon_used`
+- `pv_count`
+- `last_click_gap`
+- `purchase_intent`
+- `freshness_score`
+
+这些特征仅适用于 `session_time` 任务，因为它们通常需要用户已经进入商品浏览或交互阶段后才可观察到。
+
+#### 2.2.4 禁止使用的泄漏特征
+
+- `like_num`
+- `comment_num`
+- `share_num`
+- `collect_num`
+- `interaction_rate`
+- `social_influence`
+
+这些特征属于典型的 post-event / post-exposure 信号，若直接用于训练，会高估模型效果，破坏部署可行性。
 
 ---
 
-## 3. Data Preprocessing & Feature Engineering
+## 3. 任务重定义与数据泄漏控制
 
-### 3.1 Data Leakage Analysis
+### 3.1 为什么需要重定义任务
 
-A critical preprocessing step was identifying and removing **data leakage features**. Data leakage occurs when features that would not be available at prediction time are included in the training data, artificially inflating model performance.
+项目早期最大的问题是：将“商品刚上架时的优化预测”和“用户浏览过程中是否转化的预测”混在一起建模。
 
-**Leakage identification through causal reasoning:**
+这种做法会导致：
 
-The following 6 engagement features were identified as **post-purchase artifacts**:
+- 训练时使用了上线时实际拿不到的行为信号
+- 模型离线指标偏高，但部署时无法复现
+- 系统无法明确说明“到底在什么时点进行预测”
 
-- `like_num`, `comment_num`, `share_num`, `collect_num`: These engagement metrics accumulate **after** users interact with and potentially purchase the product. In a production scenario, when a new product listing is created, these values are all zero.
-- `interaction_rate`: Derived from the above engagement metrics.
-- `social_influence`: Computed from social engagement data.
+因此，本项目将预测任务拆分为：
 
-**Causal argument**: The temporal ordering is: *product listed -> user browses -> user purchases (or not) -> user engages (likes, comments, shares)*. Including post-purchase engagement as predictive features violates temporal causality and would make the model unusable for new product predictions.
+#### `listing_time`
 
-These 6 features were dropped, reducing the feature set from 32 to 24 columns (after also dropping `user_id` and `item_id`).
+定义：在商品刚创建或刚发布时，对其转化潜力进行评分。
 
-### 3.2 Feature Engineering
+允许使用：
 
-**Category Encoding**: The `category` column (6 unique values) was encoded using `sklearn.preprocessing.LabelEncoder`:
+- 卖家可控特征
+- 静态用户画像
+- 类目特征
 
-| Category | Encoded Value |
-|---|---|
-| 其他 | 0 |
-| 家居日用 | 1 |
-| 数码家电 | 2 |
-| 服饰鞋包 | 3 |
-| 美妆个护 | 4 |
-| 食品生鲜 | 5 |
+不允许使用：
 
-**Feature Groups**: Features were organized into semantic groups for analysis:
+- 会话行为特征
+- 所有泄漏特征
 
-- **Seller-controllable** (6): `title_length`, `title_emo_score`, `img_count`, `has_video`, `price`, `discount_rate`
-- **User context** (8): `age`, `gender`, `user_level`, `purchase_freq`, `total_spend`, `register_days`, `follow_num`, `fans_num`
-- **Behavioral** (7): `is_follow_author`, `add2cart`, `coupon_received`, `coupon_used`, `pv_count`, `last_click_gap`, `purchase_intent`, `freshness_score`
-- **Category** (1): `category_encoded`
-- **Target** (1): `label`
+#### `session_time`
 
-### 3.3 Train-Test Split
+定义：在用户已经进入商品浏览会话之后，预测这次会话是否会转化。
 
-The dataset was split using stratified sampling to preserve the class distribution:
+允许使用：
 
-| Split | Size | Label Rate |
-|---|---|---|
-| Training | 80,000 (80%) | ~44.98% |
-| Test | 20,000 (20%) | ~44.98% |
+- `listing_time` 的全部特征
+- 会话行为特征
 
-```python
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42, stratify=y
-)
-```
+不允许使用：
 
-### 3.4 Feature Scaling
+- 泄漏特征
 
-`StandardScaler` was fitted on the training set and applied to both train and test sets. This is required for Logistic Regression but not for tree-based models (Random Forest, XGBoost), which are invariant to feature scaling.
+### 3.2 数据泄漏控制策略
 
-```python
-scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
-```
+本项目主要防范三类 leakage：
+
+1. **Target Leakage**
+   - 例如互动量、收藏、分享等结果后形成的特征
+2. **Train-Test Contamination**
+   - 例如在切分前先做全量标准化
+3. **Temporal Leakage**
+   - 例如用未来样本的信息帮助预测过去
+
+本项目通过以下方式控制 leakage：
+
+- 明确删除禁止特征
+- 使用 `Pipeline` 让预处理只在训练集上拟合
+- 引入时间代理切分与用户分组切分
+- 将任务定义与特征边界写入 artifacts，供训练和推理共同使用
 
 ---
 
-## 4. Model Construction & Comparison
+## 4. 建模流程
 
-### 4.1 Models Trained
+### 4.1 统一训练管线
 
-Three classification models were trained and compared:
+训练逻辑现已统一收敛到 [training_pipeline.py](/Users/macbookpro/Desktop/5126final/IS5126-final-repo/training_pipeline.py)。
 
-#### 4.1.1 Logistic Regression (LR)
+整体流程如下：
 
-- **Type**: Linear model with sigmoid activation
-- **Configuration**: `max_iter=1000, random_state=42`
-- **Input**: Scaled features (`X_train_scaled`)
-- **Strengths**: Interpretable coefficients, fast training, provides probability calibration
-- **Weaknesses**: Cannot capture non-linear feature interactions
+1. 读取原始数据
+2. 构造 `event_index` 作为时间代理顺序
+3. 按任务选择特征集
+4. 用 `ColumnTransformer` 完成预处理
+5. 用 `RandomForestClassifier` 训练分类模型
+6. 用 `CalibratedClassifierCV` 进行概率校准
+7. 输出 split 评估结果
+8. 训练全量最终模型
+9. 训练并保存聚类模块
+10. 生成 `model_artifacts.pkl`、`processed_data.csv`、`model_metrics.json`
 
-#### 4.1.2 Random Forest (RF)
+### 4.2 预处理策略
 
-- **Type**: Ensemble of 200 decision trees with bagging
-- **Configuration**: `n_estimators=200, max_depth=10, random_state=42, n_jobs=-1`
-- **Input**: Unscaled features (`X_train`)
-- **Strengths**: Handles non-linear relationships, robust to outliers, built-in feature importance
-- **Weaknesses**: Slower inference, less interpretable than LR
+当前统一预处理采用：
 
-#### 4.1.3 XGBoost (XGB)
+- 数值列：
+  - `SimpleImputer(strategy="median")`
+- 类别列：
+  - `SimpleImputer(strategy="most_frequent")`
+  - `OneHotEncoder(handle_unknown="ignore")`
 
-- **Type**: Gradient-boosted decision trees
-- **Configuration**: `n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42, eval_metric='logloss'`
-- **Input**: Unscaled features (`X_train`)
-- **Strengths**: State-of-the-art performance on tabular data, handles missing values, regularization
-- **Weaknesses**: More hyperparameters to tune, risk of overfitting
+这样可以保证：
 
-### 4.2 Evaluation Metrics
+- 缺失值处理稳定
+- 类目特征不引入伪序关系
+- 训练与推理特征处理保持一致
 
-All models were evaluated on the held-out test set (20,000 samples) using five metrics:
+### 4.3 主模型
 
-| Model | Accuracy | Precision | Recall | F1 Score | AUC-ROC |
-|---|---|---|---|---|---|
-| Logistic Regression | 0.7127 | 0.7215 | 0.5883 | 0.6481 | 0.7584 |
-| Random Forest | **0.7156** | **0.7266** | 0.5896 | 0.6510 | **0.7707** |
-| XGBoost | 0.7133 | 0.7132 | **0.6065** | **0.6556** | 0.7697 |
+当前主模型使用：
 
-**Key observations:**
+- `RandomForestClassifier`
 
-1. **AUC-ROC**: Random Forest achieved the highest AUC (0.7707), closely followed by XGBoost (0.7697). This indicates RF has the best overall discrimination ability.
-2. **Precision vs. Recall trade-off**: XGBoost has the highest recall (0.6065) and F1 (0.6556), meaning it catches more actual purchasers, while RF has the highest precision (0.7266), meaning fewer false positives.
-3. **Accuracy**: All three models achieve similar accuracy (~71.3%), suggesting the task has inherent difficulty with the available features (after removing leakage features).
-4. **LR as baseline**: Logistic Regression provides a competitive baseline, only ~1.2% below the tree-based models in AUC, suggesting the relationship is partially linear.
+主要配置包括：
 
-### 4.3 Model Selection
+- `n_estimators=300`
+- `max_depth=10`
+- `min_samples_leaf=5`
+- `class_weight="balanced_subsample"`
+- `random_state=42`
 
-**Selected model: Random Forest** (AUC = 0.7707)
+选择随机森林的原因：
 
-Selection criteria:
-- Highest AUC-ROC, the primary metric for ranking binary classifiers
-- Compatible with SHAP TreeExplainer for fast interpretability analysis
-- Built-in feature importance for quick sanity checks
-- Robust to hyperparameter choices
+- 能处理非线性关系
+- 对特征缩放不敏感
+- 与当前表格型数据适配度高
+- 易于作为稳定基线模型部署
 
-*[Placeholder: ROC curves comparison plot for all 3 models]*
+### 4.4 概率校准
 
-*[Placeholder: Confusion matrices for all 3 models]*
+由于本项目不仅输出类别，还需要输出：
 
----
+- 购买概率
+- 加权 cluster 概率
+- hybrid score
+- counterfactual 概率差值
 
-## 5. Model Selection & Training Details
+因此单纯使用原始 `predict_proba` 不足够。  
+本项目使用：
 
-### 5.1 Training Pipeline
+- `CalibratedClassifierCV(method="sigmoid")`
 
-```
-Raw Data (100K x 32)
-    |
-    v
-Drop IDs + Leakage Features (100K x 24)
-    |
-    v
-LabelEncoder(category) -> category_encoded (100K x 23 features + 1 target)
-    |
-    v
-Stratified Train/Test Split (80/20)
-    |
-    v
-StandardScaler (fit on train only)
-    |
-    +---> LR (on scaled data)
-    +---> RF (on unscaled data)
-    +---> XGBoost (on unscaled data)
-    |
-    v
-Evaluate on Test Set (Accuracy, Precision, Recall, F1, AUC)
-    |
-    v
-Select Best Model by AUC -> Random Forest
-```
+其目标不是提升 AUC，而是提升概率质量，主要通过 `Brier score` 观察。
 
-### 5.2 Hyperparameter Details
+### 4.5 阈值调优
 
-| Hyperparameter | LR | RF | XGBoost |
-|---|---|---|---|
-| n_estimators | - | 200 | 200 |
-| max_depth | - | 10 | 6 |
-| learning_rate | - | - | 0.1 |
-| max_iter | 1000 | - | - |
-| random_state | 42 | 42 | 42 |
-| n_jobs | - | -1 (all cores) | - |
-| eval_metric | - | - | logloss |
+在校准概率基础上，本项目进一步加入 threshold tuning。
 
-### 5.3 Feature Count
+做法是：
 
-The final feature vector contains **23 features**:
+1. 在训练集内部再切出一个验证子集
+2. 在验证子集上搜索阈值
+3. 以 `F1` 为目标寻找最优 threshold
+4. 将该 threshold 用于测试集评估
 
-```
-['age', 'gender', 'user_level', 'purchase_freq', 'total_spend',
- 'register_days', 'follow_num', 'fans_num', 'price', 'discount_rate',
- 'title_length', 'title_emo_score', 'img_count', 'has_video',
- 'is_follow_author', 'add2cart', 'coupon_received', 'coupon_used',
- 'pv_count', 'last_click_gap', 'purchase_intent', 'freshness_score',
- 'category_encoded']
-```
+需要注意的是：
+
+- 这种方式对 `session_time` 是有效的
+- 对 `listing_time` 则会出现极低阈值、近乎全判正类的问题
+
+因此当前 `listing_time` 的 tuned threshold 结果仅作为实验结果，不建议直接用于线上分类决策。
 
 ---
 
-## 6. Model Interpretability
+## 5. 评估方案
 
-### 6.1 Feature Importance (Tree-based)
+### 5.1 三种切分方式
 
-Both Random Forest and XGBoost provide built-in feature importance scores (based on impurity reduction for RF, gain for XGBoost). Features were color-coded by their group:
+为了避免只依赖单一切分导致的乐观估计，本项目对每个任务都进行三种评估：
 
-- Green: Seller-controllable features
-- Blue: User context features
-- Orange: Behavioral features
-- Gray: Category
+#### 5.1.1 分层随机切分
 
-*[Placeholder: Feature importance bar chart for RF and XGBoost side-by-side]*
+- 方法：`StratifiedShuffleSplit`
+- 作用：作为标准机器学习基线评估
 
-Key finding: Among seller-controllable features, `price` and `discount_rate` have the highest importance, while `title_length` and `title_emo_score` have relatively low importance (~1-2%). This motivates the hybrid scoring approach discussed in Section 9.
+#### 5.1.2 时间代理切分
 
-### 6.2 SHAP Analysis
+- 按 `event_index` 前 80% / 后 20% 切分
+- 由于当前数据集中没有显式时间戳，因此将原始样本顺序作为时间代理
+- 作用：模拟未来样本上的泛化能力
 
-SHAP (SHapley Additive exPlanations) values were computed using `TreeExplainer` on a sample of 2,000 test instances to provide both global and local interpretability.
+#### 5.1.3 用户分组切分
 
-```python
-explainer = shap.TreeExplainer(best_model)
-shap_values = explainer.shap_values(X_sample)
-```
+- 方法：`GroupShuffleSplit`
+- 分组键：`user_id`
+- 作用：避免同一用户同时出现在训练集和测试集中，评估跨用户泛化能力
 
-**Global SHAP summary** reveals:
-- `purchase_intent` and `add2cart` are the top predictors (behavioral signals of imminent purchase)
-- Among seller-controllable features, `price` has the highest SHAP impact
-- User demographics (`age`, `gender`) have moderate but consistent effects
+### 5.2 评估指标
 
-*[Placeholder: SHAP beeswarm plot]*
+本项目使用以下指标：
 
-*[Placeholder: SHAP bar plot (mean |SHAP| values)]*
+- `ROC-AUC`
+- `PR-AUC`
+- `F1`
+- `Precision`
+- `Recall`
+- `Brier Score`
+- `Positive Rate`
 
-**Seller-controllable SHAP analysis**: A focused SHAP analysis on only the 6 seller-controllable features helps sellers understand which product attributes they can change to improve conversion.
+其中：
 
-*[Placeholder: SHAP beeswarm plot for seller-controllable features only]*
-
-### 6.3 Partial Dependence Plots (PDP)
-
-PDPs show the marginal effect of each seller-controllable feature on the predicted purchase probability, averaging over all other features.
-
-```python
-from sklearn.inspection import PartialDependenceDisplay
-PartialDependenceDisplay.from_estimator(model, X_test, features=controllable_idx)
-```
-
-*[Placeholder: PDP grid for 6 seller-controllable features]*
-
-Key insights from PDPs:
-- **Price**: Negative monotonic relationship -- lower prices consistently increase purchase probability
-- **Discount rate**: Moderate positive effect up to ~20%, then diminishing returns
-- **Image count**: Slight positive effect plateauing around 3-5 images
-- **Has video**: Binary jump -- adding video provides a discrete lift
-- **Title length**: Nearly flat, confirming low ML importance
-- **Sentiment**: Weak positive trend
-
-### 6.4 Counterfactual Analysis
-
-For each seller-controllable feature, we simulate "what if" scenarios: what would happen to the purchase probability if a specific feature were changed to the category benchmark (median of purchased items)?
-
-```python
-def simulate_counterfactual(model, X_row, feature_name, new_value, feature_cols):
-    X_original = X_row.values.reshape(1, -1)
-    original_prob = model.predict_proba(X_original)[0, 1]
-    X_modified = X_original.copy()
-    X_modified[feature_name] = new_value
-    new_prob = model.predict_proba(X_modified)[0, 1]
-    return original_prob, new_prob, new_prob - original_prob
-```
-
-**Category benchmarks** are computed from the median feature values of **purchased items only** within each category:
-
-| Category | title_length | title_emo_score | img_count | has_video | price | discount_rate |
-|---|---|---|---|---|---|---|
-| 服饰鞋包 | 27 | 0.604 | 3 | 0 | 73.25 | 9.3% |
-| 数码家电 | 27 | 0.609 | 3 | 0 | 73.85 | 9.1% |
-| 食品生鲜 | 28 | 0.607 | 3 | 0 | 73.15 | 9.1% |
-| 美妆个护 | 27 | 0.606 | 3 | 0 | 75.04 | 8.5% |
-| 家居日用 | 28 | 0.607 | 3 | 0 | 72.48 | 8.6% |
-| 其他 | 28 | 0.609 | 3 | 0 | 74.53 | 8.6% |
-
-*[Placeholder: Counterfactual analysis bar chart showing expected probability delta for each feature]*
+- `ROC-AUC / PR-AUC` 用于评估区分能力
+- `Brier Score` 用于评估概率质量
+- `F1 / Precision / Recall` 用于评估分类效果
 
 ---
 
-## 7. Sentiment Analysis Pipeline
+## 6. 模型结果分析
 
-### 7.1 Problem Statement
+结果基于 [model_metrics.json](/Users/macbookpro/Desktop/5126final/IS5126-final-repo/model_metrics.json)。
 
-The dataset contains a `title_emo_score` feature representing the emotional sentiment of product titles. To enable real-time predictions on new product titles in the dashboard, we need a sentiment analysis model that can compute this score from raw Chinese text.
+### 6.1 `listing_time` 模型结果
 
-### 7.2 SnowNLP Integration
+#### 分层随机切分
 
-We use **SnowNLP**, a Python library for Chinese text processing, to compute sentiment scores from product titles:
+- Raw ROC-AUC: `0.5742`
+- Calibrated ROC-AUC: `0.5742`
+- Calibrated F1: `0.3612`
+- Tuned F1: `0.6199`
+- Tuned Threshold: `0.3250`
 
-```python
-from snownlp import SnowNLP
-raw_score = SnowNLP(title_text).sentiments  # Returns 0-1
-```
+#### 时间代理切分
 
-### 7.3 Distribution Mismatch Problem
+- Raw ROC-AUC: `0.5753`
+- Calibrated ROC-AUC: `0.5774`
+- Calibrated F1: `0.3513`
+- Tuned F1: `0.6181`
+- Tuned Threshold: `0.2750`
 
-A critical issue was discovered: SnowNLP's output distribution differs significantly from the dataset's `title_emo_score` distribution.
+#### 用户分组切分
 
-| Property | SnowNLP Output | Dataset `title_emo_score` |
-|---|---|---|
-| Distribution Shape | U-shaped (bimodal) | Bell-shaped (unimodal) |
-| Standard Deviation | ~0.33 | ~0.15 |
-| Range | 0.0002 - 0.9999 | 0.059 - 0.976 |
-| Mean | ~0.55 | ~0.60 |
+- Raw ROC-AUC: `0.5749`
+- Calibrated ROC-AUC: `0.5741`
+- Calibrated F1: `0.3574`
+- Tuned F1: `0.6220`
+- Tuned Threshold: `0.1000`
 
-This distribution shift means directly using SnowNLP scores as model input would produce unreliable predictions, as the model was trained on a different distribution.
+#### 结果解读
 
-### 7.4 Beta Quantile Calibration
+`listing_time` 模型表现整体较弱，但这是符合任务定义的。
 
-To align SnowNLP outputs with the training data distribution, we implemented **Beta distribution quantile mapping**:
+原因在于该模型严格限制在“上架时可获得”的特征范围内，仅依赖：
 
-**Step 1: Fit Beta distributions to both distributions**
+- 卖家可控属性
+- 静态用户背景
+- 类目信息
 
-- Source (SnowNLP): Beta(alpha=0.6211, beta=0.5600) -- captures the U-shape
-- Target (dataset): Beta(alpha=6.0003, beta=4.0162) -- captures the bell-shape
+在这种设定下，ROC-AUC 约 `0.57` 说明模型具备一定排序能力，但尚不足以作为高精度购买分类器。
 
-**Step 2: Quantile mapping transformation**
+更重要的是，当前 tuned threshold 虽然大幅提高了 F1，但这是通过极低阈值实现的，带来了：
 
-For a raw SnowNLP score `s`:
+- 非常高的 `positive_rate`
+- 接近 `1.0` 的 `recall`
+- 较低的 `precision`
 
-```
-percentile = Beta_source.cdf(s)          # Map to uniform [0,1]
-calibrated = Beta_target.ppf(percentile)  # Map back to target distribution
-```
+因此：
 
-```python
-def calibrate_sentiment(raw_score):
-    clipped = np.clip(raw_score, 1e-6, 1 - 1e-6)
-    percentile = stats.beta.cdf(clipped, source_alpha, source_beta)
-    calibrated = stats.beta.ppf(percentile, target_alpha, target_beta)
-    return float(calibrated)
-```
+- `listing_time` 更适合做排序、打分、商品优化诊断
+- 不适合直接作为硬分类器使用
+- 当前 tuned threshold 不建议直接用于业务上线
 
-**Why Beta quantile mapping?**
+### 6.2 `session_time` 模型结果
 
-1. It preserves the **percentile rank** of each score -- a score at the 80th percentile in SnowNLP's distribution maps to the 80th percentile in the dataset's distribution.
-2. The Beta distribution is the natural choice for modeling values bounded in [0,1] with various shapes.
-3. It handles the bimodal-to-unimodal transformation gracefully.
+#### 分层随机切分
 
-**Limitation**: This calibration assumes that the percentile rank of a sentiment score is meaningful across distributions, which may not hold perfectly for edge cases. The calibrated score should be interpreted as "a score consistent with the training data distribution" rather than a ground-truth sentiment value.
+- Raw ROC-AUC: `0.7711`
+- Calibrated ROC-AUC: `0.7711`
+- Calibrated F1: `0.6560`
+- Tuned F1: `0.6854`
+- Tuned Threshold: `0.3116`
 
----
+#### 时间代理切分
 
-## 8. User Clustering
+- Raw ROC-AUC: `0.7676`
+- Calibrated ROC-AUC: `0.7672`
+- Calibrated F1: `0.6481`
+- Tuned F1: `0.6810`
+- Tuned Threshold: `0.3250`
 
-### 8.1 Motivation
+#### 用户分组切分
 
-Different user segments respond differently to product listings. A product that converts well for one segment may not work for another. User clustering enables:
-1. **Per-cluster prediction**: Instead of using a single "average user" for prediction, we predict for each cluster separately and compute a weighted average.
-2. **Targeted marketing**: Sellers can tailor their strategies to the most profitable user segment.
+- Raw ROC-AUC: `0.7743`
+- Calibrated ROC-AUC: `0.7743`
+- Calibrated F1: `0.6525`
+- Tuned F1: `0.6897`
+- Tuned Threshold: `0.3368`
 
-### 8.2 Feature Selection for Clustering
+#### 结果解读
 
-After testing multiple feature combinations and evaluating with Silhouette score (cluster separation quality) and purchase rate variance (business relevance), the following 7 features were selected:
+`session_time` 模型显著强于 `listing_time`。
 
-| Feature | Rationale |
-|---|---|
-| `age` | Core demographic |
-| `gender` | Core demographic |
-| `user_level` | Platform engagement indicator |
-| `purchase_freq` | Purchase behavior frequency |
-| `total_spend` | Spending power |
-| `purchase_intent` | Behavioral intent signal |
-| `add2cart` | Cart behavior (strong purchase signal) |
+这说明在会话阶段，以下行为特征具有显著增益：
 
-Features were standardized using `StandardScaler` before clustering.
+- `add2cart`
+- `coupon_received`
+- `coupon_used`
+- `pv_count`
+- `purchase_intent`
+- `last_click_gap`
 
-### 8.3 Clustering Method
+同时，三种切分下结果稳定，说明该模型：
 
-**Algorithm**: K-Means with k=4 (selected via elbow method and Silhouette analysis)
+- 没有明显依赖特定 split 才表现好
+- 对不同评估方式具有较好的鲁棒性
 
-```python
-from sklearn.cluster import KMeans
-kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
-df['user_cluster'] = kmeans.fit_predict(X_user_scaled)
-```
+Threshold tuning 在 `session_time` 上是有效的：
 
-**Cluster quality metrics:**
-- Silhouette Score: 0.24
-- Purchase Rate Variance across clusters: 0.42
+- tuned threshold 大约稳定在 `0.31 - 0.34`
+- tuned F1 相比 calibrated F1 有稳定提升
 
-### 8.4 Cluster Profiles
+因此，`session_time` 可视为当前项目中真正成熟、可作为分类器使用的预测模型。
 
-| Cluster | Name | Size | % | Purchase Rate | Key Characteristics |
-|---|---|---|---|---|---|
-| C0 | Female / Frequent / Low-intent | 8,995 | 9.0% | **41.0%** | High purchase frequency (36), female-dominated (70%), moderate intent |
-| C1 | High-intent / Cart-active | 22,338 | 22.3% | **77.0%** | Highest purchase intent (7.2), almost all added to cart (99%), mixed gender |
-| C2 | Female / Low-intent | 43,210 | 43.2% | **35.1%** | Largest segment, all female, low intent (1.4), no cart additions |
-| C3 | Male / Low-intent | 25,457 | 25.5% | **35.0%** | All male, low intent (1.4), no cart additions |
+### 6.3 概率校准效果
 
-**Key insight**: Cluster C1 (High-intent / Cart-active) has a dramatically higher purchase rate (77%) compared to other clusters (35-41%). This cluster is defined primarily by high `purchase_intent` and `add2cart` signals, confirming that behavioral intent is the strongest predictor of conversion.
+校准的主要收益体现在 `Brier score` 上。
 
-### 8.5 Per-Cluster Weighted Prediction
+例如：
 
-Instead of using a global user median for prediction, the system predicts separately for each cluster using cluster-specific user medians, then computes a weighted average:
+- `listing_time`
+  - raw brier 约 `0.2445 - 0.2448`
+  - calibrated brier 约 `0.2421 - 0.2424`
+- `session_time`
+  - raw brier 约 `0.1921 - 0.1944`
+  - calibrated brier 约 `0.1906 - 0.1931`
 
-```python
-def predict_cluster_weighted(product_params, feat_cols, cat_map, coupon=0):
-    per_cluster = {}
-    weighted_sum = 0.0
-    for c_id in range(OPTIMAL_K):
-        user_params = cluster_medians[c_id]  # Cluster-specific median
-        fv = build_feature_vector(product_params, user_params, feat_cols, cat_map)
-        prob = model.predict_proba(fv)[0, 1]
-        w = cluster_weights[c_id]  # Proportion of users in cluster
-        weighted_sum += prob * w
-        per_cluster[c_id] = {'prob': prob, 'weight': w}
-    return weighted_sum, per_cluster
-```
+这说明校准确实改善了概率输出质量。
 
-This approach respects user heterogeneity: the same product may have a 62.7% purchase probability for high-intent users (C1) but only 17.8% for low-intent users (C2/C3).
+对于本项目来说，这一点非常重要，因为后续模块依赖概率值进行：
 
-*[Placeholder: Radar chart showing normalized cluster profiles]*
-
-*[Placeholder: Marketing effectiveness chart (coupon lift and video lift by cluster)]*
+- cluster 加权
+- hybrid score
+- counterfactual lift 分析
 
 ---
 
-## 9. Recommendation Engine
+## 7. 用户聚类实验
 
-### 9.1 Hybrid Scoring System
+### 7.1 聚类目标
 
-A key finding from interpretability analysis was that the ML model assigns low importance (~1-2%) to title-related features (`title_length`, `title_emo_score`). However, domain knowledge tells us that title quality is crucial for e-commerce conversion. Similarly, spam titles (e.g., repeated characters) are clearly bad but may not be penalized by the ML model.
+本项目中的聚类不用于替代监督学习，而是用于：
 
-To address this, we implemented a **hybrid scoring system** combining:
+- 构建可解释的人群画像
+- 支撑运营策略建议
+- 帮助商家理解“哪些类型用户更值得关注”
 
-1. **ML Score** (50% weight): Normalized purchase probability from the Random Forest model
-2. **Domain Knowledge Score** (50% weight): Rules-based scoring on 7 dimensions
+因此，我们将其定义为 **persona clustering**，而不是 session clustering。
 
-### 9.2 Domain Knowledge Scoring
+### 7.2 聚类实验设计
 
-The domain score evaluates products on 7 weighted dimensions:
+本项目比较了以下内容：
 
-| Dimension | Weight | Scoring Logic |
-|---|---|---|
-| Title Quality | 25% | Composite of char quality, category relevance, info density (see 9.3) |
-| Title Length | 10% | Optimal within +/-5 chars of category benchmark |
-| Sentiment | 10% | Higher positive sentiment -> higher score, full marks >= 0.7 |
-| Images | 15% | 3-6 images optimal (score=1.0), 0 images (score=0.2) |
-| Video | 15% | Has video = 1.0, no video = 0.4 |
-| Price | 15% | At or below category benchmark = high score |
-| Discount | 10% | 5-20% discount is optimal |
+#### 7.2.1 特征集
 
-### 9.3 Title Quality Assessment
+1. `persona_baseline`
+   - 基础用户画像特征
+2. `persona_value_focus`
+   - 更强调消费能力与价值
+3. `persona_demographic_plus_value`
+   - 兼顾人口属性与价值特征
 
-Title quality is evaluated on 3 sub-dimensions to detect spam and low-quality titles:
+#### 7.2.2 特征变换
 
-**1. Character Quality (weight: 35%)** -- Anti-spam detection:
-- Unique character ratio: Low ratio (< 0.3) indicates repetitive content, score multiplied by 0.15
-- Consecutive repeated characters: 4+ consecutive repeats -> score * 0.2
-- Dominant character ratio: Single character > 50% of title -> score * 0.2
+- 原始数值 + 标准化
+- `log1p + 标准化`
 
-Example: "春季女装啊啊啊啊" (spam with repeated "啊") -> char_quality score ~0.036
+#### 7.2.3 算法
 
-**2. Category Relevance (weight: 40%)** -- Keyword matching:
-- A curated dictionary of ~50-60 keywords per category is maintained
-- Score = min(1.0, matched_keywords / 3)
+- `KMeans`
+- `HDBSCAN`
 
-Example: "春季时尚女装连衣裙" matched "女装", "连衣裙", "时尚" in 服饰鞋包 -> relevance = 1.0
+其中 `KMeans` 用于生成固定簇数、适合前端展示的人群分层；  
+`HDBSCAN` 用于检查是否存在更适合密度建模的用户结构和噪声用户。
 
-**3. Information Density (weight: 25%)** -- Content richness:
-- Effective unique characters (after deduplication) / total characters
-- Measures how much information each character conveys
+### 7.3 聚类结果
 
-### 9.4 Counterfactual-Based Recommendations
+本轮实验中，统计上最佳的聚类配置为：
 
-For each seller-controllable feature, the system computes the expected purchase rate lift if the feature is changed to the category benchmark:
+- 算法：`HDBSCAN`
+- 特征集：`persona_demographic_plus_value`
+- `use_log=False`
+- 结果：
+  - silhouette: `0.2328`
+  - cluster_count: `2`
+  - noise_rate: `0.0987`
+  - size_balance: `0.5447`
 
-```python
-for feat in SELLER_CONTROLLABLE:
-    current_val = product_params[feat]
-    ideal_val = category_benchmark[feat]
-    original_prob, new_prob, delta = simulate_counterfactual(
-        model, feature_vector, feat, ideal_val, feature_cols
-    )
-    # delta = new_prob - original_prob (positive means improvement)
-```
+作为对比，较强的 `KMeans` 配置包括：
 
-Recommendations are generated based on:
-- Features below category benchmark -> suggest increase with expected lift
-- Features above category benchmark -> suggest alignment
-- Title quality issues -> specific suggestions (add keywords, reduce repetition)
-- Missing video -> suggest adding with expected lift
-- Price above median -> suggest reduction with expected lift
+- `persona_demographic_plus_value + KMeans(k=4)`
+  - silhouette: `0.2208`
 
----
+### 7.4 聚类结果解读
 
-## 10. System Architecture & Pipeline
+这一结果表明：
 
-### 10.1 System Overview
+1. 新的人群特征设计优于早期版本的简单 baseline。
+2. 数据中确实存在一定比例的噪声用户，约为 9% 到 10%。
+3. `HDBSCAN` 在统计指标上略优于 `KMeans`。
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Data Pipeline                         │
-│                                                         │
-│  social_ecommerce_data.csv (100K x 32)                 │
-│         │                                               │
-│         v                                               │
-│  analysis.ipynb                                         │
-│    ├── Data Leakage Removal (drop 6 engagement feats)  │
-│    ├── EDA & Visualization                              │
-│    ├── Feature Engineering (LabelEncoder, scaling)      │
-│    ├── Multi-Model Training (LR, RF, XGBoost)          │
-│    ├── Model Interpretability (SHAP, PDP, CF)          │
-│    ├── K-Means Clustering (4 clusters)                 │
-│    └── Save Artifacts                                   │
-│         │                                               │
-│         v                                               │
-│  model_artifacts.pkl (19MB)                             │
-│    ├── Random Forest model                              │
-│    ├── Feature columns & scalers                        │
-│    ├── Category benchmarks (per-cat medians)            │
-│    ├── KMeans model & cluster profiles                  │
-│    ├── Cluster medians & weights                        │
-│    ├── Sentiment calibration params                     │
-│    └── Model comparison results                         │
-│         │                                               │
-│         v                                               │
-│  processed_data.csv (9MB, 100K x 26)                   │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-                    │
-                    v
-┌─────────────────────────────────────────────────────────┐
-│               Streamlit Dashboard (app.py)               │
-│                                                         │
-│  Page 1: Product Analyzer                               │
-│    ├── Title Input -> SnowNLP -> Beta Calibration      │
-│    ├── Product Feature Input (category, price, etc.)   │
-│    ├── Per-Cluster Weighted Prediction                  │
-│    ├── Hybrid Score (ML 50% + Domain 50%)              │
-│    ├── Domain Score Breakdown (7 dimensions)           │
-│    ├── Title Quality Detail (3 sub-dimensions)         │
-│    ├── Counterfactual Analysis                          │
-│    ├── Target User Persona                              │
-│    └── Actionable Seller Recommendations                │
-│                                                         │
-│  Page 2: User Clusters                                  │
-│    ├── Cluster Overview Cards                           │
-│    ├── Feature Radar Chart                              │
-│    ├── Marketing Effectiveness (Coupon/Video Lift)     │
-│    ├── Detailed Cluster Profiles Table                  │
-│    └── Purchase Rate by Category x Cluster             │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-```
+但从业务角度看，仍然存在权衡：
 
-### 10.2 File Structure
+- `HDBSCAN`
+  - 优点：统计指标更高，允许噪声点存在
+  - 缺点：最终只有 2 个 cluster，业务粒度较粗
+- `KMeans(k=4)`
+  - 优点：更适合做多类 persona 卡片和商家运营建议
+  - 缺点：统计指标略低
 
-```
-Final Project/
-├── analysis.ipynb          # Full ML pipeline (45 cells)
-├── app.py                  # Streamlit dashboard (2 pages)
-├── model_artifacts.pkl     # Serialized models & artifacts (19MB)
-├── processed_data.csv      # Processed dataset (9MB, 100K x 26)
-├── social_ecommerce_data.csv  # Raw dataset (13MB, 100K x 32)
-├── requirements.txt        # Python dependencies
-└── report.md               # This report
-```
+因此，本项目对聚类的结论是：
 
-### 10.3 Dependencies
-
-| Package | Version | Purpose |
-|---|---|---|
-| pandas | >= 2.0 | Data manipulation |
-| numpy | >= 1.24 | Numerical computation |
-| scikit-learn | >= 1.3 | ML models, preprocessing, evaluation |
-| xgboost | >= 2.0 | Gradient boosted trees |
-| shap | >= 0.43 | Model interpretability |
-| matplotlib | >= 3.7 | Static visualization |
-| seaborn | >= 0.12 | Statistical visualization |
-| plotly | >= 5.15 | Interactive visualization |
-| streamlit | >= 1.30 | Dashboard framework |
-| snownlp | latest | Chinese text sentiment analysis |
-| scipy | latest | Beta distribution for sentiment calibration |
-
-### 10.4 Prediction Pipeline (Runtime)
-
-When a user inputs a product in the dashboard, the following pipeline executes:
-
-```
-User Input (title, category, price, discount, images, video, coupon)
-    │
-    ├── SnowNLP(title) -> raw_sentiment
-    │       │
-    │       v
-    │   Beta Quantile Calibration -> calibrated_sentiment
-    │
-    ├── For each cluster c in {0, 1, 2, 3}:
-    │       │
-    │       v
-    │   Build feature vector (product_params + cluster_median_user_params)
-    │       │
-    │       v
-    │   Random Forest predict_proba -> cluster_prob[c]
-    │
-    ├── weighted_avg = sum(cluster_prob[c] * cluster_weight[c])
-    │
-    ├── Title Quality Assessment (char_quality + relevance + density)
-    │
-    ├── Domain Score (7 weighted dimensions)
-    │
-    ├── Hybrid Score = 0.5 * ML_score + 0.5 * Domain_score
-    │
-    ├── Counterfactual Analysis (6 seller features vs benchmarks)
-    │
-    └── Generate Recommendations
-```
+- 在统计层面，`HDBSCAN` 是当前更优的实验结果
+- 在产品化和运营可解释性层面，`KMeans(k=4)` 仍然具有展示与沟通优势
 
 ---
 
-## 11. Dashboard & Result Presentation
+## 8. 系统运行逻辑
 
-### 11.1 Page 1: Product Analyzer
+### 8.1 训练侧
 
-The Product Analyzer is a consolidated page that provides sellers with comprehensive analysis of their product listing.
+训练由 [training_pipeline.py](/Users/macbookpro/Desktop/5126final/IS5126-final-repo/training_pipeline.py) 统一执行。
 
-**Input Section:**
-- Product title (Chinese text, auto-analyzed for sentiment and quality)
-- Category selector (6 categories)
-- Product features: image count, price, discount rate, video presence, coupon option
+训练输出包括：
 
-**Output Sections:**
+- [model_artifacts.pkl](/Users/macbookpro/Desktop/5126final/IS5126-final-repo/model_artifacts.pkl)
+- [processed_data.csv](/Users/macbookpro/Desktop/5126final/IS5126-final-repo/processed_data.csv)
+- [model_metrics.json](/Users/macbookpro/Desktop/5126final/IS5126-final-repo/model_metrics.json)
 
-1. **Prediction Results**: Two gauges showing cluster-weighted purchase probability and hybrid score. A bar chart shows per-cluster purchase probability breakdown.
+### 8.2 推理侧
 
-2. **Domain Score Breakdown**: Horizontal bar chart showing scores across 7 dimensions (title quality, length, sentiment, images, video, price, discount) with color coding (green >= 70, orange >= 40, red < 40). Title quality sub-breakdown shows character quality, category relevance, and information density.
+后端位于 [backend/main.py](/Users/macbookpro/Desktop/5126final/IS5126-final-repo/backend/main.py)。
 
-3. **Counterfactual Analysis**: Horizontal bar chart showing expected purchase rate change if each seller-controllable feature is changed to the category benchmark value.
+当前主要支持：
 
-4. **Target User Persona**: Identifies the best user cluster for the product's category, showing demographics and purchase rate. Bar chart compares purchase rates across all clusters for the selected category.
+- `/api/analyze`
+  - 默认走 `listing_time`
+- `/api/evaluate_hybrid`
+  - 默认走 `session_time`
+  - 同时结合 domain score 与外部多模态诊断能力
 
-5. **Seller Recommendations**: Actionable recommendation cards with specific suggestions and expected lift values. Each recommendation includes the current value, benchmark value, and the counterfactual expected improvement.
+### 8.3 前端与展示
 
-6. **Category Benchmark Reference**: Table comparing the product's current feature values against category benchmarks.
+前端包括：
 
-*[Placeholder: Product Analyzer page screenshot]*
+- FastAPI 后端接口
+- Vue 前端诊断页
+- Streamlit 原型页
 
-### 11.2 Page 2: User Clusters
-
-The User Clusters page provides insights into user segmentation.
-
-**Sections:**
-
-1. **Cluster Overview Cards**: 4 cards showing each cluster's purchase rate, name, user count, and percentage.
-
-2. **Feature Radar Chart**: Normalized radar plot comparing cluster profiles across 6 dimensions (age, user_level, purchase_freq, total_spend, purchase_intent, add2cart).
-
-3. **Marketing Effectiveness**: Grouped bar chart showing coupon lift and video lift for each cluster, helping sellers identify which marketing actions work best for which segments.
-
-4. **Detailed Cluster Profiles**: Table with all cluster attributes (age, gender, user_level, purchase_freq, total_spend, purchase_intent, add2cart, purchase_rate, count).
-
-5. **Category x Cluster Cross-Analysis**: Grouped bar chart showing purchase rate for every category-cluster combination, helping sellers identify the most responsive segments for their product category.
-
-*[Placeholder: User Clusters page screenshot]*
+这些页面共享同一份 artifacts，因此不会出现 notebook、训练脚本、后端三套逻辑不一致的问题。
 
 ---
 
-## 12. Limitations & Future Work
+## 9. 项目结论
 
-### 12.1 Current Limitations
+### 9.1 主要结论
 
-1. **Data leakage trade-off**: Removing 6 engagement features reduced AUC from potentially inflated values to ~0.77. While this reflects realistic prediction capability, the accuracy is moderate. The remaining behavioral features (`add2cart`, `purchase_intent`) are still strong signals that may not always be available at listing time.
+本项目的核心结论如下：
 
-2. **Sentiment calibration approximation**: The Beta quantile mapping assumes percentile preservation between SnowNLP and dataset distributions. This is an approximation that may not hold perfectly, especially for extreme values.
+1. **购买预测必须区分业务时点。**
+   将 `listing_time` 与 `session_time` 拆开后，模型能力与部署可行性得到了更清晰的解释。
 
-3. **Static benchmarks**: Category benchmarks are computed once from training data and do not update as market conditions change.
+2. **`listing_time` 模型是弱信号模型，但具备真实部署意义。**
+   它适合做上架前打分、排序与优化建议，不适合直接做强分类决策。
 
-4. **Clustering granularity**: K-Means with k=4 provides a coarse segmentation. The Silhouette score of 0.24 indicates moderate cluster quality, with potential for improvement.
+3. **`session_time` 模型是当前最强的预测模型。**
+   会话行为特征显著提升了购买预测能力，并且在多种 split 下保持稳定。
 
-5. **Title quality heuristics**: The keyword-based category relevance scoring is limited to a manually curated dictionary and may miss new or niche product terms.
+4. **概率校准是必要的。**
+   即使 AUC 提升有限，`Brier score` 的改善使得模型输出更适合用于概率型业务决策。
 
-6. **No temporal modeling**: The current model does not account for time-series effects (seasonality, trends, product lifecycle).
+5. **threshold tuning 需要区分任务使用。**
+   在 `session_time` 上有效，在 `listing_time` 上当前存在过度偏向正类的问题。
 
-### 12.2 Future Improvements
+6. **聚类更适合作为辅助解释模块，而不是主预测模块。**
+   当前最优聚类结构并不非常强，但足以支撑粗粒度 persona 分层与运营建议。
 
-1. **Feature enrichment**: Incorporate product description text features, image quality scores, and seller reputation metrics.
-2. **Advanced NLP**: Replace SnowNLP with transformer-based Chinese sentiment models (e.g., BERT-based) for more accurate sentiment analysis.
-3. **Dynamic benchmarks**: Implement rolling benchmarks that update with recent data.
-4. **A/B testing framework**: Integrate with live A/B testing to validate recommendations against actual conversion data.
-5. **Deep learning models**: Experiment with neural network architectures (TabNet, DeepFM) for potentially better prediction accuracy.
-6. **Real-time clustering**: Implement online clustering that updates user segments as new data arrives.
+### 9.2 当前最可落地的系统定位
+
+从当前结果来看，最合理的系统定位是：
+
+- `listing_time`：
+  商品上架前优化评分与卖家诊断器
+- `session_time`：
+  会话期购买转化预测器
+- 聚类模块：
+  用户画像解释层与营销建议支撑模块
 
 ---
 
-## Appendix
+## 10. 局限性与后续工作
 
-### A. Reproducibility
+### 10.1 当前局限
 
-To reproduce the results:
+1. **原始数据中缺少显式时间戳字段**
+   当前时间切分采用 `event_index` 代理，仍弱于真正的时序评估。
+
+2. **`listing_time` 的信号强度有限**
+   仅使用上架时特征时，预测能力天然较弱。
+
+3. **threshold tuning 的目标函数仍较单一**
+   当前以 F1 为目标，尚未加入 precision 约束或业务收益约束。
+
+4. **聚类统计结构仍不够强**
+   尽管新方案有所提升，但 silhouette 整体仍处于中低水平。
+
+5. **标题语义信息不足**
+   当前仅使用 `title_length` 和 `title_emo_score`，没有加入真正的标题 embedding。
+
+### 10.2 后续优化方向
+
+1. 引入真实时间字段，做严格的 time-based split 与 drift analysis。
+2. 对 `listing_time` 引入标题 embedding、类目文本信息或图片质量特征。
+3. 将 threshold tuning 从单纯 F1 优化改为：
+   - 加 precision 约束
+   - 加 positive rate 约束
+   - 或直接基于业务收益优化
+4. 对 `session_time` 增加 SHAP 或特征重要性解释。
+5. 将聚类结果进一步转化为更可执行的商家策略模板。
+
+---
+
+## 11. 复现实验方法
+
+在项目根目录执行：
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
-
-# Run the analysis notebook
-jupyter notebook analysis.ipynb
-# Execute all cells to generate model_artifacts.pkl and processed_data.csv
-
-# Launch the dashboard
-streamlit run app.py
+python training_pipeline.py
 ```
 
-### B. Model Artifacts Structure
+随后可打开：
 
-The `model_artifacts.pkl` file contains the following serialized objects:
+- [analysis.ipynb](/Users/macbookpro/Desktop/5126final/IS5126-final-repo/analysis.ipynb)
 
-| Key | Type | Description |
-|---|---|---|
-| `model` | RandomForestClassifier | Trained purchase prediction model |
-| `model_name` | str | "Random Forest" |
-| `feature_cols` | list[str] | 23 feature column names |
-| `scaler` | StandardScaler | Feature scaler (for LR compatibility) |
-| `label_encoder` | LabelEncoder | Category encoder |
-| `category_mapping` | dict | Category -> encoded value mapping |
-| `benchmarks` | dict | Per-category feature benchmarks from purchased items |
-| `comparison_df` | DataFrame | Model comparison metrics (3 models x 5 metrics) |
-| `kmeans` | KMeans | Trained clustering model (k=4) |
-| `scaler_kmeans` | StandardScaler | Scaler for clustering features |
-| `user_features_for_cluster` | list[str] | 7 features used for clustering |
-| `cluster_profiles` | DataFrame | Mean feature values per cluster |
-| `cluster_names` | dict | Human-readable cluster names |
-| `cluster_medians` | dict | Per-cluster user feature medians (for prediction) |
-| `cluster_weights` | dict | Cluster size proportions |
-| `OPTIMAL_K` | int | 4 |
-| `SELLER_CONTROLLABLE` | list[str] | 6 seller-controllable feature names |
-| `pop_stats` | dict | Per-category engagement statistics |
-| `sentiment_calibration` | dict | Beta distribution parameters for sentiment calibration |
+查看：
+
+- 双任务评估结果
+- threshold tuning 对比
+- 聚类实验表
+- 最终 cluster profiles 与策略建议
+
+---
+
+## 12. 附录：当前核心结果摘要
+
+### `listing_time`
+
+| Split | ROC-AUC | Calibrated F1 | Tuned F1 | Tuned Threshold |
+|---|---:|---:|---:|---:|
+| Stratified Random | 0.5742 | 0.3612 | 0.6199 | 0.3250 |
+| Time-Based Proxy | 0.5774 | 0.3513 | 0.6181 | 0.2750 |
+| Group-Based User | 0.5741 | 0.3574 | 0.6220 | 0.1000 |
+
+说明：Tuned F1 提升显著，但当前阈值过低，存在近乎全判正类问题，因此不建议直接采用。
+
+### `session_time`
+
+| Split | ROC-AUC | Calibrated F1 | Tuned F1 | Tuned Threshold |
+|---|---:|---:|---:|---:|
+| Stratified Random | 0.7711 | 0.6560 | 0.6854 | 0.3116 |
+| Time-Based Proxy | 0.7672 | 0.6481 | 0.6810 | 0.3250 |
+| Group-Based User | 0.7743 | 0.6525 | 0.6897 | 0.3368 |
+
+说明：`session_time` 模型表现稳定，threshold tuning 带来了合理且可解释的提升。

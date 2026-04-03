@@ -83,8 +83,10 @@ except FileNotFoundError:
     st.error("Please run analysis.ipynb first to generate model_artifacts.pkl and processed_data.csv")
     st.stop()
 
-model = artifacts['model']
-feature_cols = artifacts['feature_cols']
+models_config = artifacts.get('models', {})
+default_task = models_config.get('listing_time', {}) if models_config else {}
+model = default_task.get('calibrated_model') or artifacts['model']
+feature_cols = default_task.get('feature_names') or artifacts['feature_cols']
 benchmarks = artifacts['benchmarks']
 cluster_names = artifacts['cluster_names']
 cluster_profiles = artifacts['cluster_profiles']
@@ -136,14 +138,16 @@ def build_feature_vector(product_params, user_params, feat_cols, cat_map):
     feature_dict = {}
     feature_dict.update(product_params)
     feature_dict.update(user_params)
-    vec = []
+    vec = {}
     for col in feat_cols:
         if col == 'category_encoded':
-            vec.append(cat_map.get(product_params.get('category', ''), 0))
+            vec[col] = cat_map.get(product_params.get('category', ''), 0)
+        elif col == 'category':
+            vec[col] = product_params.get('category', '')
         elif col in feature_dict:
-            vec.append(feature_dict[col])
+            vec[col] = feature_dict[col]
         else:
-            vec.append(0)
+            vec[col] = 0
     return vec
 
 

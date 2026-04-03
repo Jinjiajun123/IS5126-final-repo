@@ -42,8 +42,19 @@ except FileNotFoundError as e:
     artifacts = None
     df = None
 
-model = artifacts['model'] if artifacts else None
-feature_cols = artifacts['feature_cols'] if artifacts else []
+models_config = artifacts.get('models', {}) if artifacts else {}
+default_task_name = 'listing_time' if 'listing_time' in models_config else None
+default_task = models_config.get(default_task_name, {}) if models_config else {}
+model = (
+    default_task.get('calibrated_model')
+    or artifacts['model']
+    if artifacts else None
+)
+feature_cols = (
+    default_task.get('feature_names')
+    or artifacts['feature_cols']
+    if artifacts else []
+)
 benchmarks = artifacts['benchmarks'] if artifacts else {}
 cluster_names = artifacts['cluster_names'] if artifacts else {}
 cluster_profiles = artifacts['cluster_profiles'] if artifacts else pd.DataFrame()
@@ -55,6 +66,8 @@ pop_stats = artifacts.get('pop_stats', {}) if artifacts else {}
 sent_cal = artifacts.get('sentiment_calibration', {}) if artifacts else {}
 cluster_medians = artifacts.get('cluster_medians', {}) if artifacts else {}
 cluster_weights = artifacts.get('cluster_weights', {}) if artifacts else {}
+feature_groups = artifacts.get('feature_groups', {}) if artifacts else {}
+task_definitions = artifacts.get('task_definitions', {}) if artifacts else {}
 
 
 # ─── Helper Functions ───
@@ -89,19 +102,38 @@ def build_feature_vector(product_params, user_params, feat_cols, cat_map):
     feature_dict = {}
     feature_dict.update(product_params)
     feature_dict.update(user_params)
-    vec = []
+    row = {}
     for col in feat_cols:
         if col == 'category_encoded':
-            vec.append(cat_map.get(product_params.get('category', ''), 0))
+            row[col] = cat_map.get(product_params.get('category', ''), 0)
+        elif col == 'category':
+            row[col] = product_params.get('category', '')
         elif col in feature_dict:
-            vec.append(feature_dict[col])
+            row[col] = feature_dict[col]
         else:
-            vec.append(0)
-    return vec
+            row[col] = 0
+    return row
 
 def predict_proba_safe(mdl, feature_vec, feat_cols):
     X = pd.DataFrame([feature_vec], columns=feat_cols)
     return float(mdl.predict_proba(X)[0, 1])
+
+
+def get_task_config(task_name: str | None):
+    if artifacts is None:
+        return None
+    if task_name and task_name in models_config:
+        cfg = models_config[task_name]
+        return {
+            "name": task_name,
+            "model": cfg.get('calibrated_model') or cfg.get('pipeline'),
+            "feature_names": cfg.get('feature_names', []),
+        }
+    return {
+        "name": default_task_name or "legacy",
+        "model": model,
+        "feature_names": feature_cols,
+    }
 
 def get_default_user_params():
     if df is None: return {}
@@ -145,6 +177,19 @@ def predict_cluster_weighted(product_params, feat_cols, cat_map, coupon=0):
             'name': cluster_names.get(c_id, f'Cluster {c_id}'),
         }
     return float(weighted_sum), per_cluster
+
+
+def build_product_params(title, category, img_count, price, discount_rate, has_video):
+    raw_emo, cal_emo = compute_sentiment(title.strip())
+    return {
+        'title_length': len(title.strip()) if title.strip() else 25,
+        'title_emo_score': cal_emo,
+        'img_count': img_count,
+        'has_video': has_video,
+        'price': price,
+        'discount_rate': discount_rate,
+        'category': category,
+    }
 
 # ─── Title Quality Scoring ───
 _CATEGORY_KEYWORDS = {
@@ -325,7 +370,9 @@ class AnalyzeRequest(BaseModel):
 def get_config():
     return {
         "categories": list(category_mapping.keys()) if category_mapping else [],
-        "model_name": artifacts.get('model_name') if artifacts else "N/A"
+        "model_name": artifacts.get('model_name') if artifacts else "N/A",
+        "feature_groups": feature_groups,
+        "tasks": task_definitions,
     }
 
 @app.post("/api/analyze")
@@ -333,18 +380,12 @@ def analyze_product(req: AnalyzeRequest):
     if not artifacts:
         raise HTTPException(status_code=500, detail="Models not loaded")
 
-    title_length = len(req.title.strip()) if req.title.strip() else 25
-    raw_emo, cal_emo = compute_sentiment(req.title.strip())
-
-    product_params = {
-        'title_length': title_length,
-        'title_emo_score': cal_emo,
-        'img_count': req.img_count,
-        'has_video': 0,  # Legacy parameter forced to 0
-        'price': req.price,
-        'discount_rate': req.discount_rate,
-        'category': req.category,
-    }
+    task_cfg = get_task_config("listing_time")
+    active_model = task_cfg["model"]
+    active_feature_cols = task_cfg["feature_names"]
+    product_params = build_product_params(
+        req.title, req.category, req.img_count, req.price, req.discount_rate, 0
+    )
     
     cat_bench = benchmarks.get(req.category, {})
     if not cat_bench:
@@ -356,11 +397,11 @@ def analyze_product(req: AnalyzeRequest):
         cat_bench['title_length'] = 25
         cat_bench['title_emo_score'] = 0.6
 
-    prob, per_cluster = predict_cluster_weighted(product_params, feature_cols, category_mapping, req.coupon)
+    prob, per_cluster = predict_cluster_weighted(product_params, active_feature_cols, category_mapping, req.coupon)
 
     user_params = get_default_user_params()
     user_params['coupon_received'] = req.coupon
-    feature_vec = build_feature_vector(product_params, user_params, feature_cols, category_mapping)
+    feature_vec = build_feature_vector(product_params, user_params, active_feature_cols, category_mapping)
 
     domain_total, domain_breakdown = compute_domain_score(product_params, cat_bench, req.title)
     hybrid, ml_score = compute_hybrid_score(prob, domain_total)
@@ -372,8 +413,8 @@ def analyze_product(req: AnalyzeRequest):
         current_val = product_params.get(feat, 0)
         ideal_val = cat_bench[feat]
         _, _, delta = simulate_counterfactual(
-            model, pd.Series(feature_vec, index=feature_cols),
-            feat, ideal_val, feature_cols
+            active_model, pd.Series(feature_vec, index=active_feature_cols),
+            feat, ideal_val, active_feature_cols
         )
         cf_results.append({
             'feature': feat,
@@ -519,6 +560,7 @@ class EvaluateHybridRequest(BaseModel):
     has_video: int = 0
     coupon: int = 0
     images: List[str] = []
+    task: Optional[str] = "session_time"
 
 def call_doubao_api(prompt_text, images_base64):
     api_key = os.environ.get("ARK_API_KEY", "c729505f-a636-472e-89e8-2a6093ba937a")
@@ -582,18 +624,15 @@ def call_doubao_api(prompt_text, images_base64):
 @app.post("/api/evaluate_hybrid")
 def evaluate_hybrid(req: EvaluateHybridRequest):
     # This mixes the traditional ML scoring with the new mocked LLM scoring logic
-    
+    task_name = req.task or "session_time"
+    task_cfg = get_task_config(task_name)
+    active_model = task_cfg["model"]
+    active_feature_cols = task_cfg["feature_names"]
+
     # 1. Base ML Logic
-    raw_emo, cal_emo = compute_sentiment(req.title.strip())
-    product_params = {
-        'title_length': len(req.title.strip()),
-        'title_emo_score': cal_emo,
-        'img_count': req.img_count,
-        'has_video': 1, # Defaulted to 1 as video upload is unsupported
-        'price': req.price,
-        'discount_rate': req.discount_rate,
-        'category': req.category,
-    }
+    product_params = build_product_params(
+        req.title, req.category, req.img_count, req.price, req.discount_rate, 1
+    )
     
     if req.category in benchmarks:
         cat_bench = benchmarks[req.category]
@@ -605,7 +644,7 @@ def evaluate_hybrid(req: EvaluateHybridRequest):
         cat_bench['title_length'] = 25
         cat_bench['title_emo_score'] = 0.6
     
-    prob, per_cluster = predict_cluster_weighted(product_params, feature_cols, category_mapping, req.coupon)
+    prob, per_cluster = predict_cluster_weighted(product_params, active_feature_cols, category_mapping, req.coupon)
     
     # Domain knowledge & hybrid score
     domain_total, domain_breakdown = compute_domain_score(product_params, cat_bench, req.title)

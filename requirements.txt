@@ -7,5 +7,8 @@ matplotlib>=3.7
 seaborn>=0.12
 plotly>=5.15
 streamlit>=1.30
+scipy>=1.11
+snownlp>=0.12
+hdbscan>=0.8
 jupyter
 nbformat
