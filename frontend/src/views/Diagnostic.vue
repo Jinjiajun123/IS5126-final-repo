@@ -99,7 +99,7 @@
             </div>
           </div>
           <div class="action-bar mt-6 flex justify-between items-center px-2">
-            <span class="text-secondary">Needs better photography?</span>
+            <span class="text-secondary"></span>
             <router-link to="/generator" class="link-btn">Use AI Generator →</router-link>
           </div>
         </div>
@@ -304,7 +304,7 @@ const scoreGrade = computed(() => {
 .switch input { opacity: 0; width: 0; height: 0; }
 .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #d1d5db; transition: .3s; border-radius: 18px; }
 .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 2px; bottom: 2px; background-color: white; transition: .3s; border-radius: 50%; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
-input:checked + .slider { background-color: var(--primary-color); }
+input:checked + .slider { background-color: #ff9800; }
 input:checked + .slider:before { transform: translateX(14px); }
 
 .report-header {

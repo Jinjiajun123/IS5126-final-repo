@@ -417,7 +417,8 @@ page = st.sidebar.radio(
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Model**: {artifacts['model_name']}")
-st.sidebar.markdown(f"**AUC**: {comparison_df['auc'].max():.4f}")
+auc_col = 'calibrated_roc_auc' if 'calibrated_roc_auc' in comparison_df.columns else comparison_df.columns[0]
+st.sidebar.markdown(f"**AUC**: {comparison_df[auc_col].max():.4f}")
 st.sidebar.markdown(f"**Samples**: {len(df):,}")
 st.sidebar.markdown(f"**Categories**: {len(category_mapping)}")
 st.sidebar.markdown(f"**Clusters**: {OPTIMAL_K}")
@@ -692,9 +693,13 @@ if page == "Product Analyzer":
             if 'user_cluster' in df.columns:
                 cat_cluster_rates = df[df['category'] == category].groupby('user_cluster')['label'].mean()
                 if len(cat_cluster_rates) > 0:
-                    best_cluster = cat_cluster_rates.idxmax()
-                    best_rate = cat_cluster_rates.max()
-                    bp = cluster_profiles.loc[best_cluster]
+                    valid_clusters = set(cluster_profiles.index)
+                    valid_rates = cat_cluster_rates[cat_cluster_rates.index.isin(valid_clusters)]
+                    if not valid_rates.empty:
+                        best_cluster = valid_rates.idxmax()
+                        best_rate = valid_rates.max()
+                        bp = cluster_profiles.loc[best_cluster]
+
 
                     st.markdown(f"""<div class="metric-card" style="background:linear-gradient(135deg,#ff6f00 0%,#ff8f00 100%);text-align:left;padding:1.2rem">
                         <h3>Best Segment for {category}</h3>

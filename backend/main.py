@@ -649,16 +649,19 @@ def evaluate_hybrid(req: EvaluateHybridRequest):
     # Domain knowledge & hybrid score
     domain_total, domain_breakdown = compute_domain_score(product_params, cat_bench, req.title)
     hybrid, ml_score_normalized = compute_hybrid_score(prob, domain_total)
-    
+
     # Extract Best Persona from the ML Baseline
     persona_context = "No specific persona matched"
-    if df is not None and 'user_cluster' in df.columns:
+    if df is not None and 'user_cluster' in df.columns and not cluster_profiles.empty:
         cat_cluster_rates = df[df['category'] == req.category].groupby('user_cluster')['label'].mean()
         if len(cat_cluster_rates) > 0:
-            best_cluster = cat_cluster_rates.idxmax()
-            bp = cluster_profiles.loc[best_cluster]
-            gender = 'Male' if bp['gender'] > 0.5 else 'Female'
-            persona_context = f"Cluster {best_cluster} ({gender}, Age ~{bp['age']:.0f}, Avg Spend ¥{bp['total_spend']:.0f})"
+            valid_clusters = set(cluster_profiles.index)
+            valid_rates = cat_cluster_rates[cat_cluster_rates.index.isin(valid_clusters)]
+            if not valid_rates.empty:
+                best_cluster = valid_rates.idxmax()
+                bp = cluster_profiles.loc[best_cluster]
+                gender = 'Male' if bp['gender'] > 0.5 else 'Female'
+                persona_context = f"Cluster {best_cluster} ({gender}, Age ~{bp['age']:.0f}, Avg Spend ¥{bp['total_spend']:.0f})"
 
     # 2. Build the Comprehensive LLM Prompt
     # Gather cluster profile narratives
