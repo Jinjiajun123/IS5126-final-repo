@@ -12,7 +12,7 @@
         
         <div class="form-group">
           <label>Product Title</label>
-          <input type="text" class="input-field" v-model="form.title" placeholder="e.g., 高级修身秋季衬衫" />
+          <input type="text" class="input-field" v-model="form.title" placeholder="e.g., Slim-Fit Fall Shirt" />
         </div>
 
         <div class="grid grid-cols-2 gap-4">
@@ -151,17 +151,6 @@ const featureLabels = {
   'discount_rate': 'Discount'
 }
 
-onMounted(async () => {
-  try {
-    const config = await fetchConfig()
-    categories.value = config.categories
-    if (categories.value.length > 0 && !categories.value.includes(form.value.category)) {
-      form.value.category = categories.value[0]
-    }
-  } catch (e) {
-    console.warn("Could not load config", e)
-  }
-})
 
 const handleAnalyze = async () => {
   loading.value = true

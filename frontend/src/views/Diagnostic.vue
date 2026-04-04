@@ -13,7 +13,7 @@
         
         <div class="form-group">
           <label>Product Title</label>
-          <input type="text" class="input-field" v-model="form.title" placeholder="e.g., 高级修身秋季衬衫" />
+          <input type="text" class="input-field" v-model="form.title" placeholder="e.g., Slim-Fit Fall Shirt" />
         </div>
 
         <div class="grid grid-cols-2 gap-4">
@@ -191,7 +191,7 @@ import { ref, computed, onMounted } from 'vue'
 import { fetchConfig } from '../api'
 import axios from 'axios'
 
-const categories = ref(['服饰鞋包', '数码家电', '食品生鲜', '美妆个护', '家居日用'])
+const categories = ref(['Others', 'Clothing, Shoes & Bags', 'Consumer Electronics & Home Appliances', 'Food & Fresh Groceries', 'Beauty & Personal Care', 'Home & Living'])
 const loading = ref(false)
 const result = ref(null)
 const hasFile = ref(false)
@@ -199,8 +199,8 @@ const imagePreviews = ref([])
 const currentImageIndex = ref(0)
 
 const form = ref({
-  title: '高级修身秋季衬衫',
-  category: '服饰鞋包',
+  title: 'Slim-Fit Fall Shirt',
+  category: 'Clothing, Shoes & Bags',
   price: 99.0,
   discount_rate: 0.1,
   img_count: 0,
@@ -211,17 +211,6 @@ const form = ref({
 const nextImage = () => { if (imagePreviews.value.length > 0) currentImageIndex.value = (currentImageIndex.value + 1) % imagePreviews.value.length; }
 const prevImage = () => { if (imagePreviews.value.length > 0) currentImageIndex.value = (currentImageIndex.value - 1 + imagePreviews.value.length) % imagePreviews.value.length; }
 
-onMounted(async () => {
-  try {
-    const config = await fetchConfig()
-    if (config.categories?.length) {
-      categories.value = config.categories
-      form.value.category = categories.value[0]
-    }
-  } catch (e) {
-    console.warn("Could not load config", e)
-  }
-})
 
 const onFileChange = (e) => {
   if (e.target.files && e.target.files.length > 0) {

@@ -204,33 +204,95 @@ def predict_cluster_weighted(product_params, feat_cols, cat_map, coupon=0):
 
 # ─── Title Quality Scoring ───
 _CATEGORY_KEYWORDS = {
-    '服饰鞋包': ['女装','男装','连衣裙','T恤','衬衫','外套','裤','裙','鞋','包','帽','袜',
-                '上衣','卫衣','毛衣','羽绒','大衣','风衣','夹克','西装','牛仔','短袖','长袖',
-                '运动鞋','高跟','靴','凉鞋','拖鞋','背包','手提','钱包','皮带','围巾',
-                '时尚','百搭','修身','显瘦','宽松','新款','韩版','潮流','休闲','正装',
-                '春','夏','秋','冬','棉','麻','丝','绸','皮','革','纯棉','真丝','雪纺',
-                '码','均码','加大','弹力','透气','保暖','防风','防水'],
-    '数码家电': ['手机','电脑','笔记本','平板','耳机','音箱','键盘','鼠标','显示器','摄像',
-                '充电','电池','数据线','保护壳','贴膜','支架','适配器','存储','U盘',
-                '空调','冰箱','洗衣机','电视','微波炉','烤箱','吸尘器','净化','加湿',
-                '智能','蓝牙','无线','高清','4K','游戏','办公','家用','便携','快充',
-                '内存','硬盘','处理器','屏幕','像素','降噪'],
-    '食品生鲜': ['零食','饼干','糕点','巧克力','糖果','坚果','果干','肉脯','海味','辣条',
-                '水果','蔬菜','肉','鱼','虾','蟹','蛋','奶','豆','米','面','油',
-                '茶','咖啡','果汁','饮料','酒','醋','酱','调料','盐','糖',
-                '有机','绿色','新鲜','纯天然','无添加','低脂','低糖','即食','速食',
-                '好吃','美味','香','脆','甜','辣','酸','鲜','营养','健康'],
-    '美妆个护': ['口红','粉底','眼影','睫毛','眉笔','腮红','遮瑕','卸妆','洁面','面膜',
-                '精华','乳液','面霜','防晒','隔离','水乳','爽肤','化妆','彩妆','护肤',
-                '洗发','护发','沐浴','牙膏','牙刷','香水','指甲','美甲',
-                '补水','保湿','美白','抗皱','控油','祛痘','修复','提亮','紧致',
-                '天然','温和','敏感','清爽','滋润'],
-    '家居日用': ['收纳','整理','置物','挂钩','衣架','垃圾桶','纸巾','毛巾','拖把','扫帚',
-                '碗','盘','杯','筷','刀','锅','壶','瓶','罐','盆',
-                '床','枕','被','毯','窗帘','地毯','沙发','桌','椅','灯','镜',
-                '家用','日用','厨房','卫浴','客厅','卧室','阳台',
-                '简约','创意','实用','多功能','便携','环保','防滑','防水','耐用'],
-    '其他': [],
+    'Clothing, Shoes & Bags': [
+        # Categories
+        'women apparel','men apparel','dresses','t-shirts','shirts','outerwear','pants','skirts','footwear','bags','hats','socks',
+        'tops','hoodies','sweatshirts','sweaters','down jackets','coats','trench coats','jackets','blazers','denim jeans',
+        # Sleeve & style types
+        'short sleeve tops','long sleeve tops',
+        # Footwear
+        'athletic sneakers','high heels','boots','sandals','slippers',
+        # Bags & accessories
+        'backpacks','tote bags','handbags','wallets','belts','scarves',
+        # Style / positioning keywords
+        'fashionable','versatile wear','slim fit','body slimming','oversized fit','new arrivals','korean fashion','trendy style',
+        'casual wear','formal wear','business attire',
+        # Seasonality
+        'spring collection','summer collection','fall collection','winter collection',
+        # Materials
+        'cotton','linen','silk','satin','leather','faux leather','100% cotton','mulberry silk','chiffon fabric',
+        # Size & features
+        'size options','one size fits all','plus size','stretch fabric','breathable fabric',
+        'thermal','windproof','water-resistant'
+    ],
+    'Consumer Electronics & Home Appliances': [
+        # Core categories
+        'smartphones','mobile phones','computers','laptops','tablets','headphones','earphones','speakers',
+        'keyboards','computer mice','monitors','webcams',
+        # Accessories & peripherals
+        'chargers','batteries','charging cables','data cables','phone cases','screen protectors',
+        'device stands','power adapters','storage devices','USB flash drives',
+        # Home appliances
+        'air conditioners','refrigerators','washing machines','televisions','microwaves','ovens',
+        'vacuum cleaners','air purifiers','humidifiers',
+        # Features & tech keywords
+        'smart devices','bluetooth enabled','wireless connectivity','high definition','4K resolution',
+        'gaming ready','office use','home use','portable devices','fast charging',
+        # Technical specs
+        'memory capacity','storage capacity','solid state drives','hard disk drives','processors',
+        'display screens','high resolution','camera pixels','noise cancelling'
+    ],
+    'Food & Fresh Groceries': [
+        # Snack foods
+        'snacks','biscuits','cookies','pastries','cakes','chocolate','candy','nuts','dried fruits',
+        'jerky','dried meat','seafood snacks','spicy snacks',
+        # Fresh food categories
+        'fresh fruits','fresh vegetables','meat','fish','shrimp','crab','eggs','dairy products',
+        'soy products','rice','flour','cooking oil',
+        # Beverages & pantry
+        'tea','coffee','fruit juice','soft drinks','beverages','alcoholic drinks',
+        'vinegar','sauces','seasonings','salt','sugar',
+        # Product attributes / health positioning
+        'organic food','natural food','fresh produce','all natural','no additives',
+        'low fat','low sugar','ready to eat','instant food','convenience food',
+        # Taste & appeal keywords
+        'delicious','tasty','crispy','sweet','spicy','sour','savory','umami',
+        'nutritious','healthy food'
+    ],
+    'Beauty & Personal Care': [
+        # Makeup
+        'lipstick','foundation','eyeshadow','mascara','eyebrow pencil','blush','concealer',
+        'makeup remover','facial cleanser','face masks',
+        # Skincare
+        'serums','essence','lotions','moisturizers','face creams','sunscreen','primer',
+        'toner','skincare sets','beauty products','cosmetics',
+        # Personal care
+        'shampoo','conditioner','body wash','toothpaste','toothbrush',
+        'perfume','fragrance','nail care','nail polish','manicure tools',
+        # Skincare concerns / benefits
+        'hydrating','moisturizing','brightening','whitening','anti-aging','anti-wrinkle',
+        'oil control','acne treatment','skin repair','firming',
+        # Product positioning
+        'natural ingredients','gentle formula','sensitive skin','refreshing','deep hydration'
+    ],
+    'Home & Living': [
+        # Storage & organization
+        'storage solutions','organizers','storage racks','hooks','hangers','trash bins',
+        'tissue paper','towels','cleaning tools','mops','brooms',
+        # Kitchenware & dining
+        'bowls','plates','cups','mugs','chopsticks','kitchen knives',
+        'cookware','pots','pans','kettles','bottles','containers','basins',
+        # Furniture & home decor
+        'beds','pillows','duvets','blankets','curtains','rugs','sofas',
+        'tables','chairs','lighting','lamps','mirrors',
+        # Usage scenarios
+        'home essentials','daily use items','kitchen supplies','bathroom accessories',
+        'living room decor','bedroom essentials','balcony items',
+        # Product attributes
+        'minimalist design','modern style','practical','multi-functional',
+        'space-saving','portable','eco-friendly','non-slip','waterproof','durable'
+    ],
+    'others': [],
 }
 _ALL_PRODUCT_KEYWORDS = set()
 for _kws in _CATEGORY_KEYWORDS.values():
