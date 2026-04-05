@@ -84,16 +84,30 @@
 
       </div>
 
-      <!-- ═══ FULL-WIDTH RECOMMENDATIONS SECTION (below the two-column grid) ═══ -->
-      <div class="full-width-section" v-if="result">
-
-        <div class="section-header">
-          <h3>Actionable Recommendations</h3>
-          <p>Data-driven strategies to maximize conversion across all user segments.</p>
+      <!-- Empty state -->
+      <div v-else class="empty-state">
+        <div class="empty-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+            <circle cx="9" cy="7" r="4"></circle>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+          </svg>
         </div>
+        <h3>Select a product to analyze</h3>
+        <p>Choose a listed product from the left panel, then click "Analyze Users" to identify user intent segments and get actionable recommendations.</p>
+      </div>
+    </div>
 
-        <!-- Rec 1 & 2: Coupon Targeting + High-Intent Decision (side by side) -->
-        <div class="grid grid-cols-2 gap-6">
+    <!-- ═══ FULL-WIDTH RECOMMENDATIONS SECTION ═══ -->
+    <div class="full-width-section" v-if="result">
+      <div class="section-header">
+        <h3>Actionable Recommendations</h3>
+        <p>Data-driven strategies to maximize conversion across all user segments.</p>
+      </div>
+
+      <!-- Rec 1 & 2: Coupon Targeting + High-Intent Decision (side by side) -->
+      <div class="grid grid-cols-2 gap-6">
           <div class="card rec-card coupon-card" v-if="result.recommendations.coupon_targeting">
             <div class="rec-badge coupon-badge">Best ROI</div>
             <h4>{{ result.recommendations.coupon_targeting.title }}</h4>
@@ -194,21 +208,6 @@
         </div>
 
       </div>
-
-      <!-- Empty state -->
-      <div v-else class="empty-state">
-        <div class="empty-icon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-            <circle cx="9" cy="7" r="4"></circle>
-            <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
-            <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
-          </svg>
-        </div>
-        <h3>Select a product to analyze</h3>
-        <p>Choose a listed product from the left panel, then click "Analyze Users" to identify user intent segments and get actionable recommendations.</p>
-      </div>
-    </div>
 
     <!-- Toast -->
     <transition name="toast">

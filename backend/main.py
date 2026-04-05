@@ -687,7 +687,7 @@ def call_doubao_api(prompt_text, images_base64=None):
     }
 
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        resp = requests.post(url, headers=headers, json=payload, timeout=120)
         resp.raise_for_status()
         data = resp.json()
         
@@ -776,16 +776,45 @@ def evaluate_hybrid(req: EvaluateHybridRequest):
     img_desc = f"{req.img_count} product images provided" if req.img_count > 0 else "no product images uploaded"
     has_uploaded_images = bool(req.images)
     if has_uploaded_images:
-        img_analysis_note = f"The merchant has uploaded {len(req.images)} promotional image(s) for your visual review."
+        img_analysis_note = f"The merchant has uploaded {len(req.images)} promotional image(s) for your visual review. You MUST evaluate whether the uploaded images are relevant to the product titled \"{req.title}\" in the \"{req.category}\" category. Assess: Does the image clearly show this type of product? Does the style/color/setting match what a buyer would expect? If the image does NOT match the product well, you MUST flag this as a weakness and suggest what kind of images would be more appropriate."
     else:
         img_analysis_note = "IMPORTANT: The merchant has NOT uploaded any promotional images for this listing. This is a significant weakness — listings without visual content typically suffer much lower click-through and conversion rates. Please factor this into your analysis and explicitly call it out as a key issue."
-    coupon_desc = f"a coupon is offered" if req.coupon else "no coupon is offered"
+    coupon_desc = f"a coupon of ¥{req.coupon_value}" if req.coupon else "no coupon is offered"
 
-    prompt = f"""You are a senior e-commerce consultant specializing in Taobao/Tmall product optimization.
+    # Convert domain feature scores to descriptive text for LLM
+    def _score_label(score):
+        if score >= 80: return "Excellent"
+        if score >= 60: return "Good"
+        if score >= 40: return "Average"
+        if score >= 20: return "Poor"
+        return "Very Poor"
+
+    bd = domain_breakdown
+    tq_detail = bd.get('_tq_detail', {})
+    feature_report = f"""Our ML feature scoring system has evaluated this listing across multiple dimensions (each scored 0-100):
+
+    - Title Quality: {bd.get('title_quality', 0):.0f}/100 ({_score_label(bd.get('title_quality', 0))})
+        - Character quality: {tq_detail.get('char_quality', 0):.0f}/100 — measures uniqueness and diversity of characters
+        - Category relevance: {tq_detail.get('relevance', 0):.0f}/100 — how well the title keywords match the "{req.category}" category
+        - Info density: {tq_detail.get('info_density', 0):.0f}/100 — effective information per character
+    - Title Length: {bd.get('title_length', 0):.0f}/100 ({_score_label(bd.get('title_length', 0))}) — current length vs category benchmark of {cat_bench.get('title_length', 25):.0f} chars
+    - Title Sentiment: {bd.get('sentiment', 0):.0f}/100 ({_score_label(bd.get('sentiment', 0))}) — emotional appeal of title wording
+    - Image Count: {bd.get('images', 0):.0f}/100 ({_score_label(bd.get('images', 0))}) — {req.img_count} image(s), category benchmark is 3-6
+    - Video: {bd.get('video', 0):.0f}/100 ({_score_label(bd.get('video', 0))}) — {"has video" if product_params.get('has_video') else "no video included"}
+    - Price Competitiveness: {bd.get('price', 0):.0f}/100 ({_score_label(bd.get('price', 0))}) — ¥{req.price} vs category average ¥{cat_bench.get('price', 0):.0f}
+    - Discount Strategy: {bd.get('discount', 0):.0f}/100 ({_score_label(bd.get('discount', 0))}) — {req.discount_rate*100:.0f}% discount rate
+
+    Overall Domain Score: {domain_total:.0f}/100
+    ML Conversion Probability: {prob*100:.1f}%
+    Hybrid Score: {hybrid:.0f}/100"""
+
+    prompt = f"""You are a senior e-commerce consultant specializing in Taobao/Tmall product optimization. You write detailed, data-driven diagnostic reports for merchants.
 
 A merchant is listing a product titled "{req.title}" in the "{req.category}" category, priced at ¥{req.price} with a {req.discount_rate*100:.0f}% discount. Currently {img_desc}, and {coupon_desc}.
 
 {img_analysis_note}
+
+{feature_report}
 
 Our machine learning model, trained on real transaction data, predicts an overall purchase conversion rate of {prob*100:.1f}% for this listing. The model identifies the following user segments and their predicted responses:
 
@@ -793,13 +822,36 @@ Our machine learning model, trained on real transaction data, predicts an overal
 
 The segment with the highest purchase intent is {persona_context}.
 
-Based on the product details, the predicted conversion data, and the user segment profiles above, please analyze this listing holistically. Consider whether the title, pricing, imagery, and discount strategy are well-matched to the target audience, and identify what the merchant is doing well and where there is room for improvement.
+Based on ALL the data above — the feature scores, the ML predictions, and the user segment profiles — please produce a professional diagnostic report. Use the feature scores internally to guide your analysis, but NEVER expose raw scores to the merchant. For any dimension scoring below 60 ("Average" or worse), it MUST appear as a weakness with a concrete improvement suggestion. For dimensions scoring 80+ ("Excellent"), highlight them as strengths.
+
+IMAGE RELEVANCE EVALUATION (MANDATORY):
+If promotional images are provided, you MUST evaluate whether the images are a good match for this specific product ("{req.title}" in "{req.category}"). Consider:
+- Does the image clearly depict this type of product?
+- Is the visual style appropriate for the category and target audience?
+- Does the image quality meet commercial standards (resolution, lighting, background)?
+If the image-product match is poor, you MUST include this as a weakness and suggest what kind of images would work better (e.g. "The uploaded image shows X but the product is Y — recommend using images that show Z with A-style photography").
+
+WRITING STYLE — follow this example closely for tone, depth, and specificity:
+- Strength example: "Promotional image is clean, high-resolution, and uses a white background with lifestyle styling — this matches top-performing Tmall listings and drives higher click-through rates."
+- Strength example: "Price point (¥99) with a 10% discount hits the sweet spot for the target demographic (young professionals, avg spend ¥1,200+), offering perceived value without eroding brand positioning."
+- Weakness example: "Title is too brief and lacks key product attributes — adding color (e.g. 'Navy Blue'), brand name, fabric material (e.g. 'Cotton Blend'), and fit details would significantly improve search relevance and buyer confidence. Category top sellers average 15-25 keyword-rich characters."
+- Weakness example: "Only 1 hero image uploaded — category benchmark is 5-8 images. Adding detail shots (fabric close-up, size chart, model back-view) would reduce return rates and increase buyer confidence."
+- Weakness example: "No coupon is currently offered — A/B tests on similar listings show a ¥5-10 coupon can lift conversion by 8-12% for medium-intent users without significant margin impact."
+- Persona example: "The highest-intent segment for this product is young professional males (age 25-30, avg spend ¥1,500+) who prefer minimalist, versatile wardrobe staples. This demographic responds strongly to clean product photography and practical title keywords. The slim-fit positioning and fall seasonality create urgency — pairing with a 'New Season' badge and a small coupon would likely push conversion above 75% for this group."
+
+KEY REQUIREMENTS for each point:
+- ABSOLUTELY DO NOT mention any raw scores, model outputs, internal metrics, or numbers from the scoring system (e.g. NEVER say "scored 35/100", "Title Quality is 60", "conversion probability is 72%", "Domain Score", "Hybrid Score"). The merchant must NOT see any technical scores. Translate everything into plain business language and actionable advice.
+- Start with a concrete observation about the listing (what the merchant did or didn't do)
+- Connect it to real marketplace impact using an em dash (—)
+- Include specific marketplace benchmarks or actionable details (e.g. category averages for image count, recommended title length, typical coupon lift percentages)
+- For weaknesses, always suggest a concrete fix with examples
+- For persona_analysis, identify the specific demographic, explain WHY they convert, and recommend one action to boost conversion further
 
 Output a JSON object with:
-1. "llm_score" (0-100): your overall quality assessment of this product listing
-2. "diagnostics": {{"strengths": [up to 3 brief points], "weaknesses": [up to 3 brief points]}}
-3. "persona_analysis": a 1-2 sentence insight about why the highest-intent segment would or would not convert
-4. "unified_score" (0-100): a comprehensive score synthesizing conversion prediction, audience fit, and listing quality"""
+1. "llm_score" (0-100): overall listing quality assessment
+2. "diagnostics": {{"strengths": [2-3 detailed points], "weaknesses": [2-3 detailed points]}}
+3. "persona_analysis": 2-3 sentences about the highest-intent segment, why they convert, and one specific recommendation
+4. "unified_score" (0-100): comprehensive score synthesizing conversion prediction, audience fit, and listing quality"""
 
     # Enforce JSON return structure
     json_prompt = prompt + '\n\nCRITICAL: Output ONLY valid JSON. No markdown formatting. Use double quotes. Structure:\n{"llm_score": number, "diagnostics": {"strengths": [string], "weaknesses": [string]}, "persona_analysis": string, "unified_score": number}'
@@ -828,51 +880,10 @@ Output a JSON object with:
             "debug_prompt": "Used Doubao API"
         }
     else:
-        llm_score = 75.5 + (req.img_count * 0.5)
-
-        # Generate diagnostics from actual domain breakdown
-        bd_main = {k: v for k, v in domain_breakdown.items() if not k.startswith('_')}
-        strengths = []
-        weaknesses = []
-
-        label_map = {
-            'title_quality': 'Title quality',
-            'title_length': 'Title length',
-            'sentiment': 'Title sentiment',
-            'images': 'Image count',
-            'video': 'Video presence',
-            'price': 'Price competitiveness',
-            'discount': 'Discount strategy',
-        }
-
-        for key, score in bd_main.items():
-            name = label_map.get(key, key)
-            if score >= 70:
-                strengths.append(f"{name} scores well ({score:.0f}/100), meeting platform best practices.")
-            elif score < 40:
-                bench_val = cat_bench.get(key.replace('images', 'img_count'), '')
-                hint = f" Category benchmark: {bench_val}." if bench_val != '' else ''
-                weaknesses.append(f"{name} is underperforming ({score:.0f}/100).{hint} Consider improving this dimension.")
-
-        if req.img_count == 0:
-            weaknesses.append("No product images uploaded. Adding 3-5 high-quality images can significantly boost conversion.")
-
-        if not strengths:
-            strengths.append(f"Overall domain score is {domain_total:.0f}/100.")
-        if not weaknesses:
-            weaknesses.append(f"Conversion rate is at {prob*100:.1f}%. Consider A/B testing different product presentations.")
-
-        return {
-            "ml_prob": prob,
-            "llm_score": llm_score,
-            "unified_score": max(0, min(100, hybrid)),
-            "diagnostics": {
-                "strengths": strengths,
-                "weaknesses": weaknesses,
-            },
-            "persona_analysis": f"The primary converting audience is {persona_context}.",
-            "debug_prompt": prompt
-        }
+        raise HTTPException(
+            status_code=503,
+            detail="Oops! Our AI analyst just went on a coffee break ☕ — please try again in a moment."
+        )
 
 
 class GenerateRequest(BaseModel):

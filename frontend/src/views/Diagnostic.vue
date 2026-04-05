@@ -193,10 +193,31 @@ import axios from 'axios'
 
 const categories = ref(['Others', 'Clothing, Shoes & Bags', 'Consumer Electronics & Home Appliances', 'Food & Fresh Groceries', 'Beauty & Personal Care', 'Home & Living'])
 const loading = ref(false)
-const result = ref(null)
 const hasFile = ref(false)
 const imagePreviews = ref([])
 const currentImageIndex = ref(0)
+
+const MOCK_RESULT = {
+  ml_prob: 0.7234,
+  llm_score: 88.0,
+  unified_score: 85,
+  diagnostics: {
+    strengths: [
+      "Promotional image is clean, high-resolution, and uses a white background with lifestyle styling — this matches top-performing Tmall listings and drives higher click-through rates.",
+      "Price point (¥99) with a 10% discount hits the sweet spot for the target demographic (young professionals, avg spend ¥1,200+), offering perceived value without eroding brand positioning."
+    ],
+    weaknesses: [
+      "Title is too brief and lacks key product attributes — adding color (e.g. 'Navy Blue'), brand name, fabric material (e.g. 'Cotton Blend'), and fit details would significantly improve search relevance and buyer confidence. Category top sellers average 15-25 keyword-rich characters.",
+      "Only 1 hero image uploaded — category benchmark is 5-8 images. Adding detail shots (fabric close-up, size chart, model back-view) would reduce return rates and increase buyer confidence.",
+      "No coupon is currently offered — A/B tests on similar listings show a ¥5-10 coupon can lift conversion by 8-12% for medium-intent users without significant margin impact."
+    ]
+  },
+  persona_analysis: "The highest-intent segment for this product is young professional males (age 25-30, avg spend ¥1,500+) who prefer minimalist, versatile wardrobe staples. This demographic responds strongly to clean product photography and practical title keywords. The slim-fit positioning and fall seasonality create urgency — pairing with a 'New Season' badge and a small coupon would likely push conversion above 75% for this group."
+}
+
+const result = ref(null)
+
+const isDefaultForm = ref(true)
 
 const form = ref({
   title: 'Slim-Fit Fall Shirt',
@@ -208,8 +229,8 @@ const form = ref({
   coupon_value: 10
 })
 
-// Pre-load demo image for the mock product
-import { onMounted as onMountedHook } from 'vue'
+// Pre-load demo image
+import { onMounted as onMountedHook, watch } from 'vue'
 onMountedHook(() => {
   const demoImg = '/images/slim-fit-fall-shirt.png'
   fetch(demoImg).then(r => r.blob()).then(blob => {
@@ -222,6 +243,12 @@ onMountedHook(() => {
   }).catch(() => {})
 })
 
+// Clear result when any form field changes so user re-analyzes via real API
+watch(() => [form.value.title, form.value.category, form.value.price, form.value.discount_rate, form.value.coupon, form.value.coupon_value], () => {
+  result.value = null
+  isDefaultForm.value = false
+})
+
 const nextImage = () => { if (imagePreviews.value.length > 0) currentImageIndex.value = (currentImageIndex.value + 1) % imagePreviews.value.length; }
 const prevImage = () => { if (imagePreviews.value.length > 0) currentImageIndex.value = (currentImageIndex.value - 1 + imagePreviews.value.length) % imagePreviews.value.length; }
 
@@ -232,6 +259,8 @@ const onFileChange = (e) => {
     form.value.img_count = e.target.files.length
     imagePreviews.value = []
     currentImageIndex.value = 0
+    result.value = null
+    isDefaultForm.value = false
     Array.from(e.target.files).forEach(file => {
       const reader = new FileReader()
       reader.onload = (ev) => {
@@ -243,6 +272,10 @@ const onFileChange = (e) => {
 }
 
 const handleAnalyze = async () => {
+  if (isDefaultForm.value) {
+    result.value = MOCK_RESULT
+    return
+  }
   loading.value = true
   try {
     const payload = { ...form.value, images: imagePreviews.value }
