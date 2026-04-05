@@ -6,12 +6,12 @@ import router from './router'
 import ECharts from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
-import { BarChart, GaugeChart, RadarChart } from 'echarts/charts'
+import { BarChart, GaugeChart, RadarChart, PieChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, TitleComponent, LegendComponent, PolarComponent } from 'echarts/components'
 
 use([
   CanvasRenderer,
-  BarChart, GaugeChart, RadarChart,
+  BarChart, GaugeChart, RadarChart, PieChart,
   GridComponent, TooltipComponent, TitleComponent, LegendComponent, PolarComponent
 ])
 

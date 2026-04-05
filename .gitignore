@@ -10,3 +10,9 @@ node_modules/
 .env
 .venv/
 venv/
+
+# Build output
+frontend/dist/
+
+# Generated images
+vibe_images/

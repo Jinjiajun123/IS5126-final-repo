@@ -203,9 +203,23 @@ const form = ref({
   category: 'Clothing, Shoes & Bags',
   price: 99.0,
   discount_rate: 0.1,
-  img_count: 0,
+  img_count: 1,
   coupon: 0,
   coupon_value: 10
+})
+
+// Pre-load demo image for the mock product
+import { onMounted as onMountedHook } from 'vue'
+onMountedHook(() => {
+  const demoImg = '/images/slim-fit-fall-shirt.png'
+  fetch(demoImg).then(r => r.blob()).then(blob => {
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      imagePreviews.value = [ev.target.result]
+      hasFile.value = true
+    }
+    reader.readAsDataURL(blob)
+  }).catch(() => {})
 })
 
 const nextImage = () => { if (imagePreviews.value.length > 0) currentImageIndex.value = (currentImageIndex.value + 1) % imagePreviews.value.length; }
