@@ -712,28 +712,6 @@ def call_doubao_api(prompt_text, images_base64=None):
 
 @app.post("/api/evaluate_hybrid")
 def evaluate_hybrid(req: EvaluateHybridRequest):
-    # ── MOCK MODE: Demo-quality report for Slim-Fit Fall Shirt ──
-    if "slim-fit fall shirt" in (req.title or "").lower():
-        return {
-            "ml_prob": 0.7234,
-            "llm_score": 88.0,
-            "unified_score": 85,
-            "diagnostics": {
-                "strengths": [
-                    "Promotional image is clean, high-resolution, and uses a white background with lifestyle styling — this matches top-performing Tmall listings and drives higher click-through rates.",
-                    "Price point (¥99) with a 10% discount hits the sweet spot for the target demographic (young professionals, avg spend ¥1,200+), offering perceived value without eroding brand positioning."
-                ],
-                "weaknesses": [
-                    "Title is too brief and lacks key product attributes — adding color (e.g. 'Navy Blue'), brand name, fabric material (e.g. 'Cotton Blend'), and fit details would significantly improve search relevance and buyer confidence. Category top sellers average 15-25 keyword-rich characters.",
-                    "Only 1 hero image uploaded — category benchmark is 5-8 images. Adding detail shots (fabric close-up, size chart, model back-view) would reduce return rates and increase buyer confidence.",
-                    "No coupon is currently offered — A/B tests on similar listings show a ¥5-10 coupon can lift conversion by 8-12% for medium-intent users without significant margin impact."
-                ]
-            },
-            "persona_analysis": "The highest-intent segment for this product is young professional males (age 25-30, avg spend ¥1,500+) who prefer minimalist, versatile wardrobe staples. This demographic responds strongly to clean product photography and practical title keywords. The slim-fit positioning and fall seasonality create urgency — pairing with a 'New Season' badge and a small coupon would likely push conversion above 75% for this group.",
-            "debug_prompt": "Mock demo mode"
-        }
-
-    # This mixes the traditional ML scoring with the new mocked LLM scoring logic
     task_name = req.task or "session_time"
     task_cfg = get_task_config(task_name)
     active_model = task_cfg["model"]
@@ -901,20 +879,68 @@ class GenerateRequest(BaseModel):
     description: str
     audience: str
     style: str
+    customStyle: Optional[str] = None
+    image: Optional[str] = None  # base64 reference image from frontend
+
+
+STYLE_PROMPTS = {
+    "minimalist": "clean minimalist product photography, white background, soft shadows, studio lighting, high-end commercial style",
+    "lifestyle": "warm lifestyle photography, natural lighting, earthy tones, cozy atmosphere, real-life setting",
+    "luxury": "dark luxurious background, dramatic lighting, gold accents, premium feel, high-end advertising",
+}
+
+
+def call_seedream_api(prompt: str, ref_image_b64: str = None) -> str:
+    """Call Volcengine ARK Seedream API to generate a single image. Returns image URL or None."""
+    api_key = os.environ.get("ARK_API_KEY", "c729505f-a636-472e-89e8-2a6093ba937a")
+    if not api_key:
+        return None
+
+    url = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "doubao-seedream-4-5-251128",
+        "prompt": prompt,
+        "response_format": "url",
+        "size": "1024x1024",
+    }
+
+    if ref_image_b64:
+        payload["image"] = [ref_image_b64]
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=120)
+        resp.raise_for_status()
+        data = resp.json()
+        if "data" in data and len(data["data"]) > 0:
+            item = data["data"][0]
+            return item.get("url") or item.get("b64_json")
+        return None
+    except Exception as e:
+        print(f"Seedream API error: {e}")
+        return None
+
 
 @app.post("/api/generate_creative")
 def generate_creative(req: GenerateRequest):
-    # Pure Image Generation API Route
-    mock_images = [
-        "https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&q=80&w=400",
-        "https://images.unsplash.com/photo-1434389678219-e08b8e0b6be5?auto=format&fit=crop&q=80&w=400",
-        "https://images.unsplash.com/photo-1550614000-4b95d4ebf04f?auto=format&fit=crop&q=80&w=400",
-        "https://images.unsplash.com/photo-1485230895905-ef2911475149?auto=format&fit=crop&q=80&w=400"
-    ]
-    
-    return {
-        "images": mock_images
-    }
+    style_desc = STYLE_PROMPTS.get(req.style, req.customStyle or req.style)
+    prompt = f"E-commerce advertising image: {req.description}. Target audience: {req.audience}. Visual style: {style_desc}."
+
+    ref_image = req.image if req.image else None
+    images = []
+    for _ in range(4):
+        img_url = call_seedream_api(prompt, ref_image)
+        if img_url:
+            images.append(img_url)
+
+    if not images:
+        raise HTTPException(status_code=502, detail="Image generation failed. Please check API key and try again.")
+
+    return {"images": images}
 
 
 # ─── Audience Insights: Session-Time Analysis APIs ───

@@ -106,7 +106,10 @@ const onFileChange = (e) => {
 const handleGenerate = async () => {
   loading.value = true
   try {
-    const res = await axios.post('http://localhost:8000/api/generate_creative', form.value)
+    const res = await axios.post('http://localhost:8000/api/generate_creative', {
+      ...form.value,
+      image: imagePreview.value || undefined
+    })
     result.value = res.data
   } catch (e) {
     console.error(e)
